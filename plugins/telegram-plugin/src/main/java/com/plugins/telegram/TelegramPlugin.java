@@ -1,3 +1,5 @@
+package com.plugins.telegram;
+
 import com.framework.api.MediaPlugin;
 import com.framework.core.Kernel;
 import com.framework.core.config.Configuration;
@@ -14,15 +16,20 @@ public class TelegramPlugin implements MediaPlugin {
     private TelegramListenerService listener;
 
     @Override
-    public String getName() { return "TelegramIntegration"; }
+    public String getName() {
+        return "TelegramIntegration";
+    }
 
     @Override
-    public String getVersion() { return "2.1.0"; }
+    public String getVersion() {
+        return "2.1.0";
+    }
 
     @Override
     public void onEnable(Kernel kernel) {
         Configuration config = kernel.getConfigManager().getConfig();
-        if (!config.telegramEnabled) return;
+        if (!config.telegramEnabled)
+            return;
 
         // 1. Server starten (Teil des Plugins!)
         localServer = new LocalBotServer(kernel);
@@ -33,8 +40,9 @@ public class TelegramPlugin implements MediaPlugin {
         kernel.getPipelineManager().setUploadHandler(sink);
 
         // 3. Listener starten
-        listener = new TelegramListenerService(kernel, config.telegramToken);
-        TelegramWizard wizard = new TelegramWizard(kernel, msg -> listener.sendText(msg.chatId(), msg.text()));
+        listener = new TelegramListenerService(kernel, config.telegramToken, config.telegramAllowedChats);
+        TelegramWizard wizard = new TelegramWizard(kernel,
+                msg -> listener.sendText(msg.chatId(), msg.threadId(), msg.text()));
         listener.setWizard(wizard);
 
         // Listener registriert sich selbständig beim Start für Updates
@@ -42,10 +50,11 @@ public class TelegramPlugin implements MediaPlugin {
 
         // 4. Kommunikation zum Kernel herstellen
         // Damit CoreCommands antworten kann, ohne das Plugin zu kennen:
-        kernel.registerMessageSender((chatId, text) -> listener.sendText(chatId, text));
+        kernel.registerMessageSender((chatId, threadId, text) -> listener.sendText(chatId, threadId, text));
 
         // Damit Befehle aus dem Kernel beim Listener landen:
-        // Wir übergeben dem Listener die CommandRegistry des Kernels, damit er dort nachschauen kann
+        // Wir übergeben dem Listener die CommandRegistry des Kernels, damit er dort
+        // nachschauen kann
         listener.setCommandRegistryReference(kernel.getCommandRegistry());
 
         logger.info("✈️ Telegram Plugin online.");
@@ -53,7 +62,9 @@ public class TelegramPlugin implements MediaPlugin {
 
     @Override
     public void onDisable() {
-        if (listener != null) listener.stopService();
-        if (localServer != null) localServer.stop();
+        if (listener != null)
+            listener.stopService();
+        if (localServer != null)
+            localServer.stop();
     }
 }

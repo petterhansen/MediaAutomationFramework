@@ -1,4 +1,4 @@
-package internal;
+package com.plugins.party.internal;
 
 import com.framework.api.MediaSource;
 import com.framework.core.Kernel;
@@ -37,25 +37,56 @@ public class PartySource implements MediaSource {
     private long timeKemono = 0;
     private static final long CACHE_LIFETIME = 1000 * 60 * 60; // 1 Stunde Cache
 
-    public record Creator(String id, String name, String service) {}
-    public record Post(String id, String service, String user, String title, String content, FileInfo file, List<FileInfo> attachments, String published) {}
-    public record FileInfo(String name, String path) {}
+    public record Creator(String id, String name, String service) {
+    }
+
+    public record Post(String id, String service, String user, String title, String content, FileInfo file,
+            List<FileInfo> attachments, String published) {
+    }
+
+    public record FileInfo(String name, String path) {
+    }
 
     public PartySource(Kernel kernel) {
         this.kernel = kernel;
     }
 
     @Override
-    public String getName() { return "PartySource"; }
+    public String getName() {
+        return "PartySource";
+    }
 
     @Override
     public void execute(QueueTask task) {
         String query = task.getString("query");
-        if (query == null) return;
+        if (query == null)
+            return;
 
         int targetPostCount = task.getInt("amount", 1);
         String source = task.getString("source");
+
+        // MediaChat-style auto-source detection: try Coomer first, then Kemono
         boolean isKemono = "kemono".equalsIgnoreCase(source);
+
+        if (source.equalsIgnoreCase("auto") || source.equalsIgnoreCase("coomer") || source.equalsIgnoreCase("party")) {
+            // Try Coomer first
+            List<Creator> coomerCreators = getCreatorsCached(COOMER_API, false);
+            Creator coomerCreator = searchCreatorSmart(coomerCreators, query, null);
+
+            if (coomerCreator == null) {
+                // Coomer not found, try Kemono
+                logger.info("🔄 Creator not found in Coomer, trying Kemono fallback...");
+                List<Creator> kemonoCreators = getCreatorsCached(KEMONO_API, true);
+                Creator kemonoCreator = searchCreatorSmart(kemonoCreators, query, null);
+
+                if (kemonoCreator != null) {
+                    isKemono = true;
+                    logger.info("✅ Found in Kemono: " + kemonoCreator.name());
+                }
+            } else {
+                logger.info("✅ Found in Coomer: " + coomerCreator.name());
+            }
+        }
 
         String apiUrl = isKemono ? KEMONO_API : COOMER_API;
 
@@ -76,29 +107,55 @@ public class PartySource implements MediaSource {
     private void handlePopularSearch(QueueTask task, String baseUrl, int targetPostCount, boolean isKemono) {
         try {
             String json = fetch(baseUrl + "/posts/popular", isKemono);
-            if (json == null) return;
+            if (json == null)
+                return;
             List<Post> posts = parsePostList(json);
 
             int queued = 0;
             for (Post post : posts) {
-                if (queued >= targetPostCount) break;
+                if (queued >= targetPostCount)
+                    break;
                 Creator tempCreator = new Creator(post.user(), post.user(), post.service());
                 boolean has = false;
 
-                if (post.file() != null && processFile(post.file(), post, tempCreator, task, isKemono)) has=true;
+                if (post.file() != null && processFile(post.file(), post, tempCreator, task, isKemono))
+                    has = true;
 
                 if (post.attachments() != null) {
                     for (FileInfo att : post.attachments()) {
-                        if (processFile(att, post, tempCreator, task, isKemono)) has=true;
+                        if (processFile(att, post, tempCreator, task, isKemono))
+                            has = true;
                     }
                 }
-                if(has) queued++;
+                if (has)
+                    queued++;
                 task.setTotalItems(Math.max(queued, targetPostCount));
             }
-        } catch (Exception e) { logger.error("PopSearch Error", e); }
+        } catch (Exception e) {
+            logger.error("PopSearch Error", e);
+        }
     }
 
-    private void handleCreatorSearch(QueueTask task, String baseUrl, String query, int targetPostCount, boolean isKemono) {
+    /**
+     * Check if a creator exists in the specified source (coomer or kemono)
+     * Used by download-cmd-plugin for fallback logic
+     */
+    public boolean creatorExists(String query, String source) {
+        boolean isKemono = source.equalsIgnoreCase("kemono");
+        String baseUrl = isKemono ? "https://kemono.su/api/v1" : "https://coomer.su/api/v1";
+
+        try {
+            List<Creator> allCreators = getCreatorsCached(baseUrl, isKemono);
+            Creator creator = searchCreatorSmart(allCreators, query, null);
+            return creator != null;
+        } catch (Exception e) {
+            logger.warn("Error checking creator existence: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    private void handleCreatorSearch(QueueTask task, String baseUrl, String query, int targetPostCount,
+            boolean isKemono) {
         try {
             // OPTIMIZED: Liste nur laden, wenn Cache leer oder alt
             List<Creator> allCreators = getCreatorsCached(baseUrl, isKemono);
@@ -126,31 +183,39 @@ public class PartySource implements MediaSource {
                 logger.info("Found " + posts.size() + " posts.");
 
                 for (Post post : posts) {
-                    if (filesQueued >= targetPostCount) break;
+                    if (filesQueued >= targetPostCount)
+                        break;
 
                     if (post.attachments() != null) {
                         for (FileInfo att : post.attachments()) {
-                            if (processFile(att, post, creator, task, isKemono)) filesQueued++;
+                            if (processFile(att, post, creator, task, isKemono))
+                                filesQueued++;
                         }
                     }
-                    if (post.file() != null && processFile(post.file(), post, creator, task, isKemono)) filesQueued++;
+                    if (post.file() != null && processFile(post.file(), post, creator, task, isKemono))
+                        filesQueued++;
                 }
                 offset += 50;
                 task.setTotalItems(Math.max(filesQueued + 1, targetPostCount));
             }
             task.setTotalItems(filesQueued);
 
-        } catch (Exception e) { logger.error("CreatorSearch Error", e); }
+        } catch (Exception e) {
+            logger.error("CreatorSearch Error", e);
+        }
     }
 
     private boolean processFile(FileInfo info, Post post, Creator creator, QueueTask task, boolean isKemono) {
-        if (info.path() == null) return false;
+        if (info.path() == null)
+            return false;
 
         String historyKey = (creator.name() != null ? creator.name() : creator.id());
-        if (kernel.getHistoryManager().isProcessed(historyKey, info.name())) return false;
+        if (kernel.getHistoryManager().isProcessed(historyKey, info.name()))
+            return false;
 
         String safeTitle = (post.title() != null ? post.title() : post.id()).replaceAll("[^a-zA-Z0-9.-]", "_");
-        if (safeTitle.length() > 50) safeTitle = safeTitle.substring(0, 50);
+        if (safeTitle.length() > 50)
+            safeTitle = safeTitle.substring(0, 50);
 
         String fileName = safeTitle + "_" + info.name();
 
@@ -166,7 +231,8 @@ public class PartySource implements MediaSource {
         } else {
             // Fall 2: Relative URL (Muss /data enthalten)
             String path = info.path();
-            if (!path.startsWith("/")) path = "/" + path;
+            if (!path.startsWith("/"))
+                path = "/" + path;
 
             // FIX: Pfad muss mit /data beginnen, sonst 404
             if (!path.startsWith("/data")) {
@@ -179,6 +245,7 @@ public class PartySource implements MediaSource {
 
         PipelineItem item = new PipelineItem(url, fileName, task);
         item.getMetadata().put("creator", historyKey);
+        item.getMetadata().put("source", isKemono ? "kemono" : "coomer");
         item.getMetadata().put("service", post.service());
         item.getMetadata().put("post_date", post.published());
         item.getMetadata().put("raw_id", info.name());
@@ -232,21 +299,65 @@ public class PartySource implements MediaSource {
         try {
             String u = String.format("%s/%s/user/%s/posts?o=%d", baseUrl, c.service(), c.id(), offset);
             return parsePostList(fetch(u, isKemono));
-        } catch(Exception e){ return Collections.emptyList(); }
+        } catch (Exception e) {
+            return Collections.emptyList();
+        }
     }
 
     private List<Creator> fetchCreators(String baseUrl, boolean isKemono) {
-        try { return gson.fromJson(fetch(baseUrl + "/creators", isKemono), new TypeToken<List<Creator>>(){}.getType()); } catch(Exception e){ return new ArrayList<>(); }
+        try {
+            return gson.fromJson(fetch(baseUrl + "/creators", isKemono), new TypeToken<List<Creator>>() {
+            }.getType());
+        } catch (Exception e) {
+            return new ArrayList<>();
+        }
     }
 
     private Creator searchCreatorSmart(List<Creator> all, String q, String s) {
-        if(all==null)return null;
-        for(Creator c:all) if(c.name().equalsIgnoreCase(q) || c.id().equalsIgnoreCase(q)) return c;
+        if (all == null || q == null)
+            return null;
+
+        String query = q.trim();
+        String qLower = query.toLowerCase();
+
+        // 1. PRIORITY: Exact Match (Name OR ID)
+        for (Creator c : all) {
+            if (c.name().trim().equalsIgnoreCase(query))
+                return c;
+            if (c.id().trim().equalsIgnoreCase(query))
+                return c;
+        }
+
+        // 2. PRIORITY: Starts With (Name)
+        for (Creator c : all) {
+            if (c.name().toLowerCase().trim().startsWith(qLower))
+                return c;
+        }
+
+        // 3. PRIORITY: Contains (Sorted by Shortest Name)
+        List<Creator> matches = new ArrayList<>();
+        for (Creator c : all) {
+            if (c.name().toLowerCase().contains(qLower))
+                matches.add(c);
+        }
+
+        if (!matches.isEmpty()) {
+            matches.sort(Comparator.comparingInt(c -> c.name().length()));
+            return matches.get(0);
+        }
+
         return null;
     }
 
     private List<Post> parsePostList(String json) {
-        try { JsonElement r=JsonParser.parseString(json); if(r.isJsonArray()) return gson.fromJson(r, new TypeToken<List<Post>>(){}.getType()); } catch(Exception e){} return new ArrayList<>();
+        try {
+            JsonElement r = JsonParser.parseString(json);
+            if (r.isJsonArray())
+                return gson.fromJson(r, new TypeToken<List<Post>>() {
+                }.getType());
+        } catch (Exception e) {
+        }
+        return new ArrayList<>();
     }
 
     private String fetch(String u, boolean isKemono) throws Exception {
@@ -260,7 +371,8 @@ public class PartySource implements MediaSource {
         c.setRequestProperty("Referer", isKemono ? "https://kemono.cr/" : "https://coomer.st/");
 
         InputStream i = c.getInputStream();
-        if("gzip".equals(c.getContentEncoding())) i = new GZIPInputStream(i);
+        if ("gzip".equals(c.getContentEncoding()))
+            i = new GZIPInputStream(i);
         return new String(i.readAllBytes(), StandardCharsets.UTF_8);
     }
 }

@@ -4,12 +4,14 @@ import java.util.List;
 
 /**
  * Generisches Interface für Pipeline-Stufen.
+ * 
  * @param <I> Input Typ
  * @param <O> Output Typ
  */
 public interface StageHandler<I, O> {
     /**
      * Verarbeitet ein Item.
+     * 
      * @param input Das Eingabe-Objekt
      * @return Das Ergebnis (oder null bei Fehler)
      * @throws Exception Wenn etwas schiefgeht
@@ -20,6 +22,17 @@ public interface StageHandler<I, O> {
      * Batch-Verarbeitung für Uploads (optional).
      */
     default void processBatch(List<I> batch) throws Exception {
-        for (I item : batch) process(item);
+        for (I item : batch)
+            process(item);
+    }
+
+    /**
+     * Prüft, ob dieser Handler das Item verarbeiten kann.
+     * 
+     * @param input Das Eingabe-Objekt
+     * @return true wenn verarbeitbar, sonst false
+     */
+    default boolean supports(I input) {
+        return true;
     }
 }

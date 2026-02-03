@@ -28,25 +28,18 @@ public class ConfigManager {
         return configuration;
     }
 
-    public synchronized void save() {
-        try (Writer w = new FileWriter(configFile, StandardCharsets.UTF_8)) {
-            gson.toJson(configuration, w);
-        } catch (IOException e) {
-            logger.error("Failed to save configuration", e);
-        }
-    }
-
     private void load() {
         if (!configFile.exists()) {
             configuration = new Configuration();
             logger.info("No config file found. Created default configuration.");
-            save(); // Defaults schreiben
+            saveConfig(); // Defaults schreiben
             return;
         }
 
         try (Reader r = new FileReader(configFile, StandardCharsets.UTF_8)) {
             configuration = gson.fromJson(r, Configuration.class);
-            if (configuration == null) configuration = new Configuration();
+            if (configuration == null)
+                configuration = new Configuration();
             logger.info("Configuration loaded.");
         } catch (Exception e) {
             logger.error("Failed to load configuration, using defaults", e);

@@ -1,55 +1,158 @@
+package com.plugins.coremedia;
+
 import com.framework.api.MediaPlugin;
 import com.framework.core.Kernel;
-import com.plugins.coremedia.TranscoderService;
+import com.framework.core.config.Configuration;
+import com.framework.common.util.OsUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 public class CoreMediaPlugin implements MediaPlugin {
     private static final Logger logger = LoggerFactory.getLogger(CoreMediaPlugin.class);
-    private DownloadService downloader;
-    private TranscoderService transcoder;
+    private TranscoderService transcoderService;
+    private DownloadService downloadService;
 
     @Override
-    public String getName() { return "CoreMedia"; }
+    public String getName() {
+        return "CoreMedia";
+    }
 
     @Override
-    public String getVersion() { return "1.0.0"; }
+    public String getVersion() {
+        return "1.2.1"; // Version erhöht
+    }
 
     @Override
     public void onEnable(Kernel kernel) {
-        // Services instanziieren (liegen jetzt im Plugin-Package!)
-        this.downloader = new DownloadService(kernel);
-        this.transcoder = new TranscoderService();
+        setupDefaultSettings(kernel);
 
-        // 1. Download Handler registrieren
-        kernel.getPipelineManager().setDownloadHandler(item -> {
-            // Logik zum Extrahieren von Headern/Ordnern bleibt hier im Plugin
-            Map<String, String> headers = null;
-            if (item.getMetadata().containsKey("headers")) {
-                headers = (Map<String, String>) item.getMetadata().get("headers");
+        this.transcoderService = new TranscoderService(kernel);
+        this.downloadService = new DownloadService(kernel);
+
+        kernel.registerService(TranscoderService.class, transcoderService);
+        kernel.registerService(DownloadService.class, downloadService);
+
+        // --- DOWNLOAD HANDLER (Standard HTTP) ---
+        kernel.getPipelineManager().registerDownloadHandler(new com.framework.core.pipeline.StageHandler<>() {
+            @Override
+            public boolean supports(com.framework.core.pipeline.PipelineItem item) {
+                // Fallback catch-all for http/https, BUT ignore yt-dlp items (handled by
+                // YouTubePlugin)
+                return !Boolean.TRUE.equals(item.getMetadata().get("yt_dlp")) &&
+                        item.getSourceUrl().startsWith("http");
             }
 
-            String folderName = kernel.getConfigManager().getConfig().downloadPath;
-            if (item.getMetadata().containsKey("creator")) folderName = (String) item.getMetadata().get("creator");
+            @Override
+            public File process(com.framework.core.pipeline.PipelineItem item) throws Exception {
+                Map<String, Object> meta = item.getMetadata();
+                String folder = (String) meta.get("creator");
+                if (folder == null)
+                    folder = "downloads";
 
-            return downloader.downloadFile(item.getSourceUrl(), folderName, item.getOriginalName(), headers);
+                @SuppressWarnings("unchecked")
+                Map<String, String> headers = (Map<String, String>) meta.get("headers");
+
+                return downloadService.downloadFile(item.getSourceUrl(), folder, item.getOriginalName(), headers);
+            }
         });
 
-        // 2. Processing Handler registrieren
-        kernel.getPipelineManager().setProcessingHandler(item -> {
-            boolean reencode = item.getParentTask().getInt("reencode", 0) == 1;
-            return transcoder.processMedia(item.getDownloadedFile(), reencode);
+        // --- GEÄNDERTER PROCESSING HANDLER ---
+        kernel.getPipelineManager().registerProcessingHandler(new com.framework.core.pipeline.StageHandler<>() {
+            @Override
+            public boolean supports(com.framework.core.pipeline.PipelineItem item) {
+                return true; // Catch-all for now, or check mime types
+            }
+
+            @Override
+            public List<File> process(com.framework.core.pipeline.PipelineItem item) throws Exception {
+                File inputFile = item.getDownloadedFile();
+                if (inputFile == null || !inputFile.exists())
+                    return Collections.emptyList();
+
+                String fileName = inputFile.getName().toLowerCase();
+
+                // Use TranscoderService.processMedia which handles both images and videos
+                logger.info("🎬 Verarbeite Datei: {}", fileName);
+                List<File> processedFiles = transcoderService.processMedia(inputFile, false);
+
+                return processedFiles != null ? processedFiles : Collections.singletonList(inputFile);
+            }
         });
 
-        kernel.registerService(TranscoderService.class, this.transcoder);
-
-        logger.info("💿 CoreMedia Services (DL/FFmpeg) bereit.");
+        logger.info("🎬 CoreMedia aktiv: Pipeline mit Transcoder verbunden.");
     }
 
     @Override
     public void onDisable() {
-        // Optional: Laufende Downloads abbrechen
+        // Ressourcen freigeben
     }
+
+    private void setupDefaultSettings(Kernel kernel) {
+        Configuration config = kernel.getConfigManager().getConfig();
+        String pluginName = getName();
+
+        boolean dirty = false;
+
+        if (config.getPluginSetting(pluginName, "ffmpeg_path", "").isEmpty()) {
+            String defaultPath = OsUtils.isWindows() ? "tools/ffmpeg.exe" : "/usr/bin/ffmpeg";
+            config.setPluginSetting(pluginName, "ffmpeg_path", defaultPath);
+            dirty = true;
+        }
+
+        if (config.getPluginSetting(pluginName, "ffprobe_path", "").isEmpty()) {
+            String defaultPath = OsUtils.isWindows() ? "tools/ffprobe.exe" : "/usr/bin/ffprobe";
+            config.setPluginSetting(pluginName, "ffprobe_path", defaultPath);
+            dirty = true;
+        }
+
+        if (config.getPluginSetting(pluginName, "use_gpu", "").isEmpty()) {
+            config.setPluginSetting(pluginName, "use_gpu", "false");
+            dirty = true;
+        }
+
+        if (config.getPluginSetting(pluginName, "preset", "").isEmpty()) {
+            config.setPluginSetting(pluginName, "preset", "fast");
+            dirty = true;
+        }
+
+        if (config.getPluginSetting(pluginName, "crf", "").isEmpty()) {
+            config.setPluginSetting(pluginName, "crf", "23");
+            dirty = true;
+        }
+
+        // NEU: Wasserzeichen Einstellungen
+        if (config.getPluginSetting(pluginName, "watermark_enabled", "").isEmpty()) {
+            config.setPluginSetting(pluginName, "watermark_enabled", "false");
+            dirty = true;
+        }
+        if (config.getPluginSetting(pluginName, "watermark_text", "").isEmpty()) {
+            config.setPluginSetting(pluginName, "watermark_text", "Media Automation Framework");
+            dirty = true;
+        }
+        if (config.getPluginSetting(pluginName, "watermark_size", "").isEmpty()) {
+            config.setPluginSetting(pluginName, "watermark_size", "24");
+            dirty = true;
+        }
+        if (config.getPluginSetting(pluginName, "watermark_opacity", "").isEmpty()) {
+            config.setPluginSetting(pluginName, "watermark_opacity", "0.5");
+            dirty = true;
+        }
+
+        // Video split threshold (in MB)
+        if (config.getPluginSetting(pluginName, "split_threshold_mb", "").isEmpty()) {
+            config.setPluginSetting(pluginName, "split_threshold_mb", "1999");
+            dirty = true;
+        }
+
+        if (dirty) {
+            kernel.getConfigManager().saveConfig();
+        }
+    }
+
+    // Old yt-dlp code removed (moved to YouTubePlugin)
 }

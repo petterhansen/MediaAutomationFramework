@@ -1,4 +1,4 @@
-package internal;
+package com.plugins.telegram.internal;
 
 import com.google.gson.JsonObject;
 import org.slf4j.Logger;

@@ -1,4 +1,4 @@
-package internal;
+package com.plugins.dashboard.internal;
 
 import com.sun.net.httpserver.HttpExchange;
 import org.apache.commons.fileupload.UploadContext;

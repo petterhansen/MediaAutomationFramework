@@ -8,7 +8,9 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -16,113 +18,281 @@ public class PipelineManager {
     private static final Logger logger = LoggerFactory.getLogger(PipelineManager.class);
     private final Kernel kernel;
 
-    private final BlockingQueue<PipelineItem> dlQueue = new LinkedBlockingQueue<>();
-    private final BlockingQueue<PipelineItem> procQueue = new LinkedBlockingQueue<>();
-    private final BlockingQueue<PipelineItem> ulQueue = new LinkedBlockingQueue<>();
+    private final PriorityBlockingQueue<PipelineItem> dlQueue = new PriorityBlockingQueue<>();
+    private final PriorityBlockingQueue<PipelineItem> procQueue = new PriorityBlockingQueue<>();
+    private final BlockingQueue<PipelineItem> ulQueue = new LinkedBlockingQueue<>(); // Upload doesn't need priority
 
     private volatile PipelineItem currentDlItem;
     private volatile PipelineItem currentProcItem;
     private volatile PipelineItem currentUlItem;
 
-    private StageHandler<PipelineItem, File> downloadHandler;
-    private StageHandler<PipelineItem, List<File>> processingHandler;
-    private StageHandler<PipelineItem, Void> uploadHandler;
+    // Handlers (List for Chain of Responsibility)
+    private final List<StageHandler<PipelineItem, File>> downloadHandlers = new CopyOnWriteArrayList<>();
+    private final List<StageHandler<PipelineItem, List<File>>> processingHandlers = new CopyOnWriteArrayList<>();
+    private final List<StageHandler<PipelineItem, Void>> uploadHandlers = new CopyOnWriteArrayList<>();
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private volatile boolean surgeonMode = false;
+
+    // Pipeline hooks for plugin extensibility
+    private final List<PipelineHook> hooks = new CopyOnWriteArrayList<>();
 
     public PipelineManager(Kernel kernel) {
         this.kernel = kernel;
     }
 
-    public void setDownloadHandler(StageHandler<PipelineItem, File> handler) { this.downloadHandler = handler; }
-    public void setProcessingHandler(StageHandler<PipelineItem, List<File>> handler) { this.processingHandler = handler; }
-    public void setUploadHandler(StageHandler<PipelineItem, Void> handler) { this.uploadHandler = handler; }
+    public void registerDownloadHandler(StageHandler<PipelineItem, File> handler) {
+        downloadHandlers.add(0, handler); // Add to front (Newer = Higher Priority)
+    }
+
+    public void registerProcessingHandler(StageHandler<PipelineItem, List<File>> handler) {
+        processingHandlers.add(0, handler);
+    }
+
+    public void registerUploadHandler(StageHandler<PipelineItem, Void> handler) {
+        uploadHandlers.add(0, handler);
+    }
+
+    // Deprecated setters for backward compatibility, now just register
+    public void setDownloadHandler(StageHandler<PipelineItem, File> handler) {
+        registerDownloadHandler(handler);
+    }
+
+    public void setProcessingHandler(StageHandler<PipelineItem, List<File>> handler) {
+        registerProcessingHandler(handler);
+    }
+
+    public void setUploadHandler(StageHandler<PipelineItem, Void> handler) {
+        registerUploadHandler(handler);
+    }
+
+    private <I, O> StageHandler<I, O> getHandlerFor(List<StageHandler<I, O>> handlers, I item) {
+        for (StageHandler<I, O> handler : handlers) {
+            if (handler.supports(item)) {
+                return handler;
+            }
+        }
+        return null;
+    }
 
     public void submit(PipelineItem item) {
         String creator = (String) item.getMetadata().get("creator");
         String checkId = (String) item.getMetadata().get("raw_id");
-        if (checkId == null) checkId = item.getOriginalName();
+        if (checkId == null)
+            checkId = item.getOriginalName();
 
         if (creator != null && kernel.getHistoryManager().isProcessed(creator, checkId)) {
             logger.debug("History Skip (Pipeline): {}", checkId);
             return;
         }
 
-        try {
-            dlQueue.put(item);
-            logger.debug("Submitted to pipeline: {}", item.getOriginalName());
-        } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        dlQueue.put(item);
+        logger.debug("Submitted to pipeline: {}", item.getOriginalName());
     }
 
     public void start() {
-        if (running.getAndSet(true)) return;
+        if (running.getAndSet(true))
+            return;
         new Thread(this::downloadLoop, "Pipe-DL").start();
         new Thread(this::processingLoop, "Pipe-Proc").start();
         new Thread(this::uploadLoop, "Pipe-UL").start();
     }
 
-    public void stop() { running.set(false); }
-    public void clear() { dlQueue.clear(); procQueue.clear(); ulQueue.clear(); }
-    public void setSurgeonMode(boolean active) { this.surgeonMode = active; }
-    public boolean isSurgeonMode() { return surgeonMode; }
+    public void stop() {
+        running.set(false);
+    }
 
-    public PipelineItem getCurrentDlItem() { return currentDlItem; }
-    public PipelineItem getCurrentProcItem() { return currentProcItem; }
-    public PipelineItem getCurrentUlItem() { return currentUlItem; }
+    public void clear() {
+        dlQueue.clear();
+        procQueue.clear();
+        ulQueue.clear();
+    }
+
+    public void setSurgeonMode(boolean active) {
+        this.surgeonMode = active;
+    }
+
+    public boolean isSurgeonMode() {
+        return surgeonMode;
+    }
+
+    public PipelineItem getCurrentDlItem() {
+        return currentDlItem;
+    }
+
+    public PipelineItem getCurrentProcItem() {
+        return currentProcItem;
+    }
+
+    public PipelineItem getCurrentUlItem() {
+        return currentUlItem;
+    }
+
+    // Snapshot methods for monitoring
+    public List<PipelineItem> getDlQueueSnapshot() {
+        return new ArrayList<>(dlQueue);
+    }
+
+    public List<PipelineItem> getProcQueueSnapshot() {
+        return new ArrayList<>(procQueue);
+    }
+
+    public List<PipelineItem> getUlQueueSnapshot() {
+        return new ArrayList<>(ulQueue);
+    }
+
+    // Hook management
+    public void registerHook(PipelineHook hook) {
+        hooks.add(hook);
+        logger.info("Pipeline hook registered: {}", hook.getClass().getSimpleName());
+    }
+
+    public void removeHook(PipelineHook hook) {
+        hooks.remove(hook);
+        logger.info("Pipeline hook removed: {}", hook.getClass().getSimpleName());
+    }
 
     // --- LOOPS ---
 
     private void downloadLoop() {
         while (running.get()) {
-            if (surgeonMode) { sleepBriefly(); continue; }
+            if (surgeonMode) {
+                sleepBriefly();
+                continue;
+            }
             try {
                 PipelineItem item = dlQueue.poll(1, TimeUnit.SECONDS);
-                if (item == null) continue;
+                if (item == null)
+                    continue;
                 currentDlItem = item;
                 try {
-                    if (downloadHandler != null) {
-                        File result = downloadHandler.process(item);
+                    hooks.forEach(h -> h.beforeDownload(item));
+
+                    StageHandler<PipelineItem, File> handler = getHandlerFor(downloadHandlers, item);
+                    if (handler != null) {
+                        File result = handler.process(item);
                         if (result != null && result.exists()) {
                             item.setDownloadedFile(result);
-                            markHistory(item); // Sofort sichern
+
+                            // Track download in database
+                            String creator = (String) item.getMetadata().get("creator");
+                            String source = (String) item.getMetadata().get("source");
+                            kernel.getDatabaseService().markDownloaded(item.getSourceUrl(), creator, source);
+
+                            hooks.forEach(h -> h.afterDownload(item, result));
+
                             procQueue.put(item);
+                            logger.info("✅ Downloaded: {}", item.getSourceUrl());
                         } else {
-                            logger.warn("Download failed: {}", item.getOriginalName());
+                            throw new RuntimeException("Download returned null or non-existent file");
                         }
+                    } else {
+                        logger.warn("⚠️ No download handler found for: {}", item.getSourceUrl());
                     }
-                } finally { currentDlItem = null; }
-            } catch (Exception e) { logger.error("DL Error", e); }
+                } catch (Exception e) {
+                    logger.error("❌ Download failed: {}", item.getSourceUrl(), e);
+                    item.setLastError(e);
+                    hooks.forEach(h -> h.onError(item, e, "download"));
+
+                    if (item.shouldRetry()) {
+                        long delay = item.getNextRetryDelay();
+                        logger.warn("⏱️ Retrying in {}ms (attempt {}/{})",
+                                delay, item.getRetryCount() + 1, item.getMaxRetries());
+
+                        item.incrementRetry();
+                        Thread.sleep(delay);
+                        dlQueue.put(item);
+                    } else {
+                        logger.error("❌ Max retries exceeded for: {}", item.getSourceUrl());
+                        kernel.getDatabaseService().markFailed(item.getSourceUrl(),
+                                e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+                    }
+                } finally {
+                    currentDlItem = null;
+                }
+            } catch (Exception e) {
+                logger.error("DL Error", e);
+            }
         }
     }
 
     private void processingLoop() {
         while (running.get()) {
-            if (surgeonMode) { sleepBriefly(); continue; }
+            if (surgeonMode) {
+                sleepBriefly();
+                continue;
+            }
             try {
                 PipelineItem item = procQueue.poll(1, TimeUnit.SECONDS);
-                if (item == null) continue;
+                if (item == null)
+                    continue;
                 currentProcItem = item;
                 try {
-                    if (processingHandler != null) {
-                        List<File> result = processingHandler.process(item);
+                    hooks.forEach(h -> h.beforeProcessing(item));
+
+                    StageHandler<PipelineItem, List<File>> handler = getHandlerFor(processingHandlers, item);
+                    if (handler != null) {
+                        List<File> result = handler.process(item);
                         if (result != null && !result.isEmpty()) {
                             item.setProcessedFiles(result);
+
+                            // Track processing in database with file metadata
+                            trackProcessedMetadata(item, result);
+
+                            hooks.forEach(h -> h.afterProcessing(item, result));
+
                             ulQueue.put(item);
+                            logger.info("✅ Processed: {}", item.getSourceUrl());
+                        } else {
+                            throw new RuntimeException("Processing returned null or empty list");
                         }
+                    } else {
+                        // Fallback: No processing needed/supported, pass through
+                        // logger.debug("No processing handler, passing through.");
+                        // item.setProcessedFiles(Collections.singletonList(item.getDownloadedFile()));
+                        // ulQueue.put(item);
+                        // WARN: Strict mode for now
+                        logger.warn("⚠️ No processing handler found for: {}", item.getSourceUrl());
                     }
-                } finally { currentProcItem = null; }
-            } catch (Exception e) { logger.error("Proc Error", e); }
+                } catch (Exception e) {
+                    logger.error("❌ Processing failed: {}", item.getSourceUrl(), e);
+                    item.setLastError(e);
+                    hooks.forEach(h -> h.onError(item, e, "processing"));
+
+                    if (item.shouldRetry()) {
+                        long delay = item.getNextRetryDelay();
+                        logger.warn("⏱️ Retrying processing in {}ms (attempt {}/{})",
+                                delay, item.getRetryCount() + 1, item.getMaxRetries());
+
+                        item.incrementRetry();
+                        Thread.sleep(delay);
+                        procQueue.put(item);
+                    } else {
+                        logger.error("❌ Max retries exceeded for processing: {}", item.getSourceUrl());
+                        kernel.getDatabaseService().markFailed(item.getSourceUrl(),
+                                "Processing: "
+                                        + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+                    }
+                } finally {
+                    currentProcItem = null;
+                }
+            } catch (Exception e) {
+                logger.error("Proc Error", e);
+            }
         }
     }
 
     // INTELLIGENTER UPLOAD LOOP (Batching)
     private void uploadLoop() {
         while (running.get()) {
-            if (surgeonMode) { sleepBriefly(); continue; }
+            if (surgeonMode) {
+                sleepBriefly();
+                continue;
+            }
             try {
                 PipelineItem first = ulQueue.poll(1, TimeUnit.SECONDS);
-                if (first == null) continue;
+                if (first == null)
+                    continue;
 
                 // Batching starten
                 List<PipelineItem> batch = new ArrayList<>();
@@ -159,14 +329,16 @@ public class PipelineManager {
                     targetItem = batch.get(0);
                 } else {
                     // Virtuelles Group-Item erstellen
-                    targetItem = new PipelineItem(first.getSourceUrl(), "MediaGroup-" + batch.size(), first.getParentTask());
+                    targetItem = new PipelineItem(first.getSourceUrl(), "MediaGroup-" + batch.size(),
+                            first.getParentTask());
 
                     // FIX: Kompilierfehler behoben (putAll statt setMetadata)
                     targetItem.getMetadata().putAll(first.getMetadata());
 
                     List<File> allFiles = new ArrayList<>();
                     for (PipelineItem p : batch) {
-                        if (p.getProcessedFiles() != null) allFiles.addAll(p.getProcessedFiles());
+                        if (p.getProcessedFiles() != null)
+                            allFiles.addAll(p.getProcessedFiles());
                     }
                     targetItem.setProcessedFiles(allFiles);
                     logger.info("📦 Batching: {} items merged into MediaGroup.", batch.size());
@@ -174,26 +346,95 @@ public class PipelineManager {
 
                 currentUlItem = targetItem;
                 try {
-                    if (uploadHandler != null) {
-                        uploadHandler.process(targetItem);
+                    hooks.forEach(h -> h.beforeUpload(targetItem));
 
-                        // Stats inkrementieren
+                    StageHandler<PipelineItem, Void> handler = getHandlerFor(uploadHandlers, targetItem);
+                    if (handler != null) {
+                        handler.process(targetItem);
+
+                        // Track uploads in database
                         for (PipelineItem p : batch) {
-                            if (p.getParentTask() != null) p.getParentTask().incrementProcessed();
+                            kernel.getDatabaseService().markUploaded(p.getSourceUrl());
+                            if (p.getParentTask() != null)
+                                p.getParentTask().incrementProcessed();
+                        }
+
+                        hooks.forEach(h -> h.afterUpload(targetItem));
+                        logger.info("✅ Uploaded: {} items", batch.size());
+                    } else {
+                        logger.warn("⚠️ No upload handler found for batch.");
+                    }
+                } catch (Exception e) {
+                    logger.error("❌ Upload failed for batch", e);
+                    hooks.forEach(h -> h.onError(first, e, "upload"));
+
+                    // For upload, retry the entire batch
+                    boolean shouldRetryBatch = first.shouldRetry();
+
+                    if (shouldRetryBatch) {
+                        long delay = first.getNextRetryDelay();
+                        logger.warn("⏱️ Retrying upload in {}ms (attempt {}/{})",
+                                delay, first.getRetryCount() + 1, first.getMaxRetries());
+
+                        // Increment retry for all items in batch
+                        for (PipelineItem p : batch) {
+                            p.setLastError(e);
+                            p.incrementRetry();
+                        }
+
+                        Thread.sleep(delay);
+
+                        // Re-queue all items
+                        for (PipelineItem p : batch) {
+                            ulQueue.put(p);
+                        }
+                    } else {
+                        logger.error("❌ Max retries exceeded for upload batch");
+                        for (PipelineItem p : batch) {
+                            kernel.getDatabaseService().markFailed(p.getSourceUrl(),
+                                    "Upload: "
+                                            + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
                         }
                     }
-                } finally { currentUlItem = null; }
+                } finally {
+                    currentUlItem = null;
+                }
 
-            } catch (Exception e) { logger.error("UL Error", e); }
+            } catch (Exception e) {
+                logger.error("UL Error", e);
+            }
         }
     }
 
-    private void markHistory(PipelineItem item) {
-        String creator = (String) item.getMetadata().get("creator");
-        String rawId = (String) item.getMetadata().get("raw_id");
-        String saveId = (rawId != null) ? rawId : item.getOriginalName();
-        if (creator != null) kernel.getHistoryManager().markAsProcessed(creator, saveId);
+    /**
+     * Track processed file metadata in database
+     */
+    private void trackProcessedMetadata(PipelineItem item, List<File> processedFiles) {
+        if (processedFiles == null || processedFiles.isEmpty())
+            return;
+
+        File primaryFile = processedFiles.get(0);
+        long fileSize = primaryFile.length();
+        String fileName = primaryFile.getName();
+
+        // Extract dimensions/duration if available in metadata
+        int width = (Integer) item.getMetadata().getOrDefault("width", 0);
+        int height = (Integer) item.getMetadata().getOrDefault("height", 0);
+        double duration = ((Number) item.getMetadata().getOrDefault("duration", 0.0)).doubleValue();
+
+        kernel.getDatabaseService().markProcessed(
+                item.getSourceUrl(),
+                fileName,
+                fileSize,
+                width,
+                height,
+                duration);
     }
 
-    private void sleepBriefly() { try { Thread.sleep(1000); } catch (Exception e){} }
+    private void sleepBriefly() {
+        try {
+            Thread.sleep(1000);
+        } catch (Exception e) {
+        }
+    }
 }

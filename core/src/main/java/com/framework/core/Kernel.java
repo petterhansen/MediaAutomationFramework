@@ -3,13 +3,16 @@ package com.framework.core;
 import com.framework.api.CommandHandler;
 import com.framework.common.auth.AuthManager;
 import com.framework.common.auth.UserManager;
+import com.framework.common.util.BlacklistManager;
 import com.framework.core.config.ConfigManager;
 import com.framework.core.pipeline.PipelineManager;
 import com.framework.core.plugin.PluginLoader;
 import com.framework.core.queue.QueueManager;
+import com.framework.services.stats.ChatImporter;
 import com.framework.services.stats.HistoryManager;
 import com.framework.services.stats.StatisticsManager;
-import com.framework.web.DashboardServer;
+import com.framework.services.infrastructure.SystemStatsService;
+import com.framework.services.database.DatabaseService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -17,7 +20,6 @@ import java.io.File;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.BiConsumer;
 
 public class Kernel {
     private static final Logger logger = LoggerFactory.getLogger(Kernel.class);
@@ -32,87 +34,154 @@ public class Kernel {
     private final AuthManager authManager;
     private final StatisticsManager statisticsManager;
     private final UserManager userManager;
-    private final DashboardServer dashboardServer;
+    private final SystemStatsService systemStatsService;
+    private final ChatImporter chatImporter;
+    private final BlacklistManager blacklistManager;
+    private final DatabaseService databaseService;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final File toolsDir;
 
-    // Registry für Chat-Befehle (Plugins registrieren hier ihre Handler)
-    private final Map<String, CommandHandler> commandRegistry = new ConcurrentHashMap<>();
+    // --- SERVICE REGISTRY (Der Ersatz für harte Referenzen) ---
+    // Hier legen Plugins ihre Instanzen ab (z.B. TranscoderService,
+    // TelegramListener)
+    private final Map<Class<?>, Object> services = new ConcurrentHashMap<>();
 
-    // Generic Message Sender (Damit Plugins Nachrichten verschicken können, ohne Telegram zu kennen)
-    private BiConsumer<Long, String> messageSender;
+    // Generic Message Sender
+    private TriConsumer<Long, Integer, String> messageSender;
+
+    @FunctionalInterface
+    public interface TriConsumer<T, U, V> {
+        void accept(T t, U u, V v);
+    }
+
+    private final Map<String, CommandHandler> commandRegistry = new ConcurrentHashMap<>();
 
     private Kernel() {
         this.toolsDir = new File("tools");
-        if (!toolsDir.exists()) toolsDir.mkdirs();
+        if (!toolsDir.exists())
+            toolsDir.mkdirs();
 
-        // 1. Core Services laden
+        // Initialize database service (lightweight H2 for Raspberry Pi)
+        this.databaseService = new DatabaseService("tools/framework.db");
+
         this.configManager = new ConfigManager(this);
         this.authManager = new AuthManager(this);
         this.statisticsManager = new StatisticsManager(this);
         this.historyManager = new HistoryManager(this);
         this.userManager = new UserManager(this);
-
+        this.blacklistManager = new BlacklistManager(this);
+        this.systemStatsService = new SystemStatsService();
+        this.chatImporter = new ChatImporter(this.statisticsManager);
         this.queueManager = new QueueManager(this);
         this.pipelineManager = new PipelineManager(this);
-
         this.pluginLoader = new PluginLoader(this);
-        this.dashboardServer = new DashboardServer(this);
     }
 
     public static synchronized Kernel getInstance() {
-        if (instance == null) instance = new Kernel();
+        if (instance == null)
+            instance = new Kernel();
         return instance;
     }
 
     public void start() {
-        if (running.getAndSet(true)) return;
-        logger.info("Kernel booting... ");
+        if (running.getAndSet(true))
+            return;
+        logger.info("⚛️ Kernel booting...");
 
-        // 2. Plugins laden
-        // HIER passiert jetzt alles. Der Kernel macht selbst NICHTS mehr.
-        // Die Plugins holen sich den PipelineManager und setzen die Handler.
+        this.systemStatsService.start();
+
+        // Plugins laden (starten Dashboard, Sources, Telegram etc.)
         this.pluginLoader.loadPlugins();
 
-        // 3. Server starten
         this.queueManager.start();
         this.pipelineManager.start();
-        this.dashboardServer.start();
 
-        logger.info("Kernel active. System is modular.");
+        logger.info("✅ Kernel active.");
     }
 
-    // --- Plugin Communication API ---
+    // --- SERVICE API ---
+
+    public <T> void registerService(Class<T> clazz, T service) {
+        services.put(clazz, service);
+        logger.info("Service registered: {}", clazz.getSimpleName());
+    }
+
+    public <T> T getService(Class<T> clazz) {
+        return clazz.cast(services.get(clazz));
+    }
+
+    // --- Command & Message API ---
 
     public void registerCommand(String cmd, CommandHandler handler) {
         commandRegistry.put(cmd.toLowerCase(), handler);
-        logger.debug("Command registered: /{}", cmd);
     }
 
     public Map<String, CommandHandler> getCommandRegistry() {
         return commandRegistry;
     }
 
-    public void registerMessageSender(BiConsumer<Long, String> sender) {
+    public void registerMessageSender(TriConsumer<Long, Integer, String> sender) {
         this.messageSender = sender;
     }
 
     public void sendMessage(long chatId, String text) {
-        if (messageSender != null) {
-            messageSender.accept(chatId, text);
-        } else {
-            logger.warn("Kein MessageSender verfügbar (Telegram Plugin fehlt?). Nachricht an {}: {}", chatId, text);
-        }
+        sendMessage(chatId, null, text);
     }
 
-    // --- Getter ---
-    public File getToolsDir() { return toolsDir; }
-    public ConfigManager getConfigManager() { return configManager; }
-    public QueueManager getQueueManager() { return queueManager; }
-    public PipelineManager getPipelineManager() { return pipelineManager; }
-    public AuthManager getAuthManager() { return authManager; }
-    public StatisticsManager getStatisticsManager() { return statisticsManager; }
-    public UserManager getUserManager() { return userManager; }
-    public HistoryManager getHistoryManager() { return historyManager; }
+    public void sendMessage(long chatId, Integer threadId, String text) {
+        if (messageSender != null)
+            messageSender.accept(chatId, threadId, text);
+        else
+            logger.warn("No MessageSender registered. Msg to {} (topic {}): {}", chatId, threadId, text);
+    }
+
+    // --- Getters ---
+    public File getToolsDir() {
+        return toolsDir;
+    }
+
+    public ConfigManager getConfigManager() {
+        return configManager;
+    }
+
+    public QueueManager getQueueManager() {
+        return queueManager;
+    }
+
+    public PipelineManager getPipelineManager() {
+        return pipelineManager;
+    }
+
+    public AuthManager getAuthManager() {
+        return authManager;
+    }
+
+    public StatisticsManager getStatisticsManager() {
+        return statisticsManager;
+    }
+
+    public UserManager getUserManager() {
+        return userManager;
+    }
+
+    public HistoryManager getHistoryManager() {
+        return historyManager;
+    }
+
+    public SystemStatsService getSystemStatsService() {
+        return systemStatsService;
+    }
+
+    public ChatImporter getChatImporter() {
+        return chatImporter;
+    }
+
+    public BlacklistManager getBlacklistManager() {
+        return blacklistManager;
+    }
+
+    public DatabaseService getDatabaseService() {
+        return databaseService;
+    }
 }

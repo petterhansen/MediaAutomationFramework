@@ -1,3 +1,5 @@
+package com.plugins.coremedia;
+
 import com.framework.core.Kernel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

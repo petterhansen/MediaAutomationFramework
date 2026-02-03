@@ -4,110 +4,146 @@ import com.framework.core.Kernel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * HistoryManager - Tracks downloaded and processed media using database.
+ * Migrated from file-based to database for better querying and performance on
+ * Raspberry Pi.
+ */
 public class HistoryManager {
     private static final Logger logger = LoggerFactory.getLogger(HistoryManager.class);
-    private final File historyDir;
-
-    // Optional: Einfacher Cache, um Festplattenzugriffe zu reduzieren
-    private final Map<String, Set<String>> memoryCache = new ConcurrentHashMap<>();
+    private final Kernel kernel;
 
     public HistoryManager(Kernel kernel) {
-        // Nutzt den 'tools' Ordner des Kernels als Basis
-        this.historyDir = new File(kernel.getToolsDir(), "history_tracking");
-        if (!historyDir.exists()) {
-            historyDir.mkdirs();
-        }
+        this.kernel = kernel;
+        logger.debug("HistoryManager initialized with database backend");
     }
 
+    /**
+     * Check if a URL has already been downloaded
+     */
+    public boolean isDownloaded(String url) {
+        if (url == null || url.isEmpty())
+            return false;
+        return kernel.getDatabaseService().hasDownloaded(url);
+    }
+
+    /**
+     * Check if a file has been processed for a creator (legacy file-based method
+     * name)
+     */
     public boolean isProcessed(String creatorName, String fileName) {
-        if (creatorName == null || fileName == null) return false;
+        if (creatorName == null || fileName == null)
+            return false;
 
-        // Check Memory Cache first (Performance!)
-        if (memoryCache.containsKey(creatorName)) {
-            return memoryCache.get(creatorName).contains(fileName);
-        }
-
-        // Fallback: Lade von Disk
-        Set<String> history = loadHistory(creatorName);
-        memoryCache.put(creatorName, history); // Cache füllen
-        return history.contains(fileName);
+        // Check if any item from this creator with this filename exists
+        return kernel.getDatabaseService().getJdbi().withHandle(handle -> {
+            Integer count = handle.createQuery(
+                    "SELECT COUNT(*) FROM media_items WHERE creator = ? AND file_name = ?")
+                    .bind(0, creatorName)
+                    .bind(1, fileName)
+                    .mapTo(Integer.class)
+                    .one();
+            return count > 0;
+        });
     }
 
+    /**
+     * Mark a download (called from pipeline)
+     */
+    public void markDownloaded(String url, String creator, String source) {
+        if (url == null || url.isEmpty())
+            return;
+        kernel.getDatabaseService().markDownloaded(url, creator, source);
+        logger.debug("Marked as downloaded: {} from {}", url, creator);
+    }
+
+    /**
+     * Mark as processed (legacy file-based method signature)
+     */
     public synchronized void markAsProcessed(String creatorName, String fileName) {
-        if (creatorName == null || fileName == null) return;
+        if (creatorName == null || fileName == null)
+            return;
 
-        // 1. Update Cache
-        if (!memoryCache.containsKey(creatorName)) {
-            loadHistory(creatorName); // Initial laden wenn nicht da
-        }
-        memoryCache.get(creatorName).add(fileName);
+        // Update or insert record
+        kernel.getDatabaseService().getJdbi().useHandle(handle -> {
+            handle.createUpdate("""
+                        MERGE INTO media_items (creator, file_name, status, processed_at, url)
+                        KEY(creator, file_name)
+                        VALUES (?, ?, 'PROCESSED', CURRENT_TIMESTAMP, NULL)
+                    """)
+                    .bind(0, creatorName)
+                    .bind(1, fileName)
+                    .execute();
+        });
 
-        // 2. Append to File
-        File historyFile = getHistoryFile(creatorName);
-        try (PrintWriter out = new PrintWriter(new FileWriter(historyFile, true))) {
-            out.println(fileName);
-        } catch (IOException e) {
-            logger.error("Fehler beim Schreiben der History für {}: {}", creatorName, e.getMessage());
-        }
+        logger.debug("Marked as processed: {} for {}", fileName, creatorName);
     }
 
-    public boolean deleteHistory(String creatorName) {
-        memoryCache.remove(creatorName);
-        File f = getHistoryFile(creatorName);
-        if (f.exists()) return f.delete();
-        return false;
-    }
-
+    /**
+     * Get download count for a specific creator
+     */
     public int getHistorySize(String creatorName) {
-        File f = getHistoryFile(creatorName);
-        if (!f.exists()) return 0;
-        // Zeilen zählen ist teuer, wir schätzen oder laden
-        return loadHistory(creatorName).size();
+        if (creatorName == null)
+            return 0;
+        return kernel.getDatabaseService().getDownloadCount(creatorName);
     }
 
+    /**
+     * Get last N entries for a creator
+     */
     public List<String> getLastEntries(String creatorName, int limit) {
-        File f = getHistoryFile(creatorName);
-        if (!f.exists()) return Collections.emptyList();
-        try {
-            List<String> lines = Files.readAllLines(f.toPath(), StandardCharsets.UTF_8);
-            int start = Math.max(0, lines.size() - limit);
-            return lines.subList(start, lines.size());
-        } catch (IOException e) {
+        if (creatorName == null)
             return Collections.emptyList();
-        }
+
+        return kernel.getDatabaseService().getJdbi().withHandle(handle -> {
+            return handle.createQuery("""
+                        SELECT file_name FROM media_items
+                        WHERE creator = ?
+                        ORDER BY downloaded_at DESC
+                        LIMIT ?
+                    """)
+                    .bind(0, creatorName)
+                    .bind(1, limit)
+                    .mapTo(String.class)
+                    .list();
+        });
     }
 
-    private Set<String> loadHistory(String creatorName) {
-        File f = getHistoryFile(creatorName);
-        Set<String> entries = Collections.synchronizedSet(new HashSet<>());
+    /**
+     * Delete history for a creator (marks as deleted in DB)
+     */
+    public boolean deleteHistory(String creatorName) {
+        if (creatorName == null)
+            return false;
 
-        if (!f.exists()) {
-            memoryCache.put(creatorName, entries);
-            return entries;
-        }
+        kernel.getDatabaseService().getJdbi().useHandle(handle -> {
+            handle.createUpdate("DELETE FROM media_items WHERE creator = ?")
+                    .bind(0, creatorName)
+                    .execute();
+        });
 
-        try (BufferedReader reader = Files.newBufferedReader(f.toPath(), StandardCharsets.UTF_8)) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (!line.trim().isEmpty()) entries.add(line.trim());
-            }
-        } catch (IOException e) {
-            logger.error("Error loading history for {}", creatorName, e);
-        }
-
-        memoryCache.put(creatorName, entries);
-        return entries;
+        logger.info("Deleted history for creator: {}", creatorName);
+        return true;
     }
 
-    private File getHistoryFile(String creatorName) {
-        // Deine Logik für Dateinamen-Säuberung (beibehalten für Kompatibilität)
-        String safeName = creatorName.replaceAll("[^a-zA-Z0-9._-]", "_").toLowerCase();
-        return new File(historyDir, safeName + ".txt");
+    /**
+     * Get total download count across all creators
+     */
+    public long getTotalDownloads() {
+        return kernel.getDatabaseService().getTotalDownloads();
+    }
+
+    /**
+     * Get list of all tracked creators
+     */
+    public List<String> getAllCreators() {
+        return kernel.getDatabaseService().getJdbi().withHandle(handle -> {
+            return handle
+                    .createQuery("SELECT DISTINCT creator FROM media_items WHERE creator IS NOT NULL ORDER BY creator")
+                    .mapTo(String.class)
+                    .list();
+        });
     }
 }

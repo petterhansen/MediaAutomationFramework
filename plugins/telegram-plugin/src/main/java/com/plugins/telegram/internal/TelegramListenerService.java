@@ -1,9 +1,8 @@
-package internal;
+package com.plugins.telegram.internal;
 
 import com.framework.api.CommandHandler;
 import com.framework.common.util.HttpUtils;
 import com.framework.core.Kernel;
-import com.framework.core.queue.QueueTask;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -25,8 +24,13 @@ public class TelegramListenerService extends Thread {
     private boolean running = true;
     private long lastUpdateId = 0;
     private TelegramWizard wizard;
+    private final java.util.Set<Long> allowedChatIds = new java.util.HashSet<>();
 
-    private final Map<String, CommandHandler> commandRegistry = new ConcurrentHashMap<>();
+    // Lokale Registry (nur für Plugin-interne Befehle)
+    private final Map<String, CommandHandler> localRegistry = new ConcurrentHashMap<>();
+
+    // Referenz auf die Kernel-Registry (für Core-Befehle wie /help, /status)
+    private Map<String, CommandHandler> kernelRegistryReference;
 
     // Scheduler für Auto-Delete Tasks
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -34,18 +38,55 @@ public class TelegramListenerService extends Thread {
     // Nutze den lokalen Server Port
     private static final String API_BASE = "http://localhost:8081/bot%s/";
 
-    public TelegramListenerService(Kernel kernel, String botToken) {
+    public TelegramListenerService(Kernel kernel, String botToken, String whitelist) {
         this.kernel = kernel;
         this.botToken = botToken;
         this.setName("TelegramListener");
+        parseWhitelist(whitelist);
+    }
+
+    private void parseWhitelist(String whitelist) {
+        if (whitelist == null || whitelist.trim().isEmpty())
+            return;
+        String[] parts = whitelist.split(",");
+        for (String p : parts) {
+            try {
+                allowedChatIds.add(Long.parseLong(p.trim()));
+            } catch (NumberFormatException e) {
+                logger.warn("Invalid Chat ID in whitelist: {}", p);
+            }
+        }
+    }
+
+    private boolean isChatAllowed(long chatId) {
+        // Wenn keine Whitelist definiert, ist alles erlaubt (Abwärtskompatibilität)
+        // ODER der Admin ist immer erlaubt
+        if (allowedChatIds.isEmpty())
+            return true;
+
+        String adminId = kernel.getConfigManager().getConfig().telegramAdminId;
+        if (adminId != null && !adminId.isEmpty() && String.valueOf(chatId).equals(adminId)) {
+            return true;
+        }
+
+        return allowedChatIds.contains(chatId);
     }
 
     public void setWizard(TelegramWizard wizard) {
         this.wizard = wizard;
     }
 
+    /**
+     * Diese Methode fehlte und verursachte den Fehler.
+     * Sie ermöglicht dem Plugin, die globale Command-Registry des Kernels zu
+     * übergeben.
+     */
+    public void setCommandRegistryReference(Map<String, CommandHandler> registry) {
+        this.kernelRegistryReference = registry;
+    }
+
     public void registerCommand(String cmd, CommandHandler handler) {
-        commandRegistry.put(cmd.toLowerCase(), handler);
+        localRegistry.put(cmd.toLowerCase(), handler);
     }
 
     @Override
@@ -68,7 +109,10 @@ public class TelegramListenerService extends Thread {
                 Thread.sleep(500); // Etwas schnelleres Polling
             } catch (Exception e) {
                 logger.error("Listener Error", e);
-                try { Thread.sleep(5000); } catch (Exception ex) {}
+                try {
+                    Thread.sleep(5000);
+                } catch (Exception ex) {
+                }
             }
         }
         scheduler.shutdown();
@@ -79,28 +123,44 @@ public class TelegramListenerService extends Thread {
         lastUpdateId = updateId;
 
         // 1. Nachrichten (Befehle) verarbeiten
-        if (update.has("message")) {
-            JsonObject msg = update.getAsJsonObject("message");
-            if (msg.has("text")) {
-                String text = msg.get("text").getAsString();
-                long chatId = msg.get("chat").getAsJsonObject().get("id").getAsLong();
-                long messageId = msg.get("message_id").getAsLong();
+        if (update.has("message") || update.has("channel_post")) {
+            boolean isChannel = update.has("channel_post");
+            JsonObject msg = isChannel ? update.getAsJsonObject("channel_post") : update.getAsJsonObject("message");
 
-                if (kernel.getUserManager() != null) {
-                    kernel.getUserManager().trackUser(msg.get("from").getAsJsonObject());
-                }
+            long chatId = msg.get("chat").getAsJsonObject().get("id").getAsLong();
+            if (!isChatAllowed(chatId)) {
+                return;
+            }
 
-                if (wizard != null && wizard.isActive(chatId)) {
+            long messageId = msg.get("message_id").getAsLong();
+            Integer threadId = msg.has("message_thread_id") ? msg.get("message_thread_id").getAsInt() : null;
+
+            // User tracken
+            if (msg.has("from") && kernel.getUserManager() != null) {
+                kernel.getUserManager().trackUser(msg.get("from").getAsJsonObject());
+            }
+
+            String text = "";
+            if (msg.has("text"))
+                text = msg.get("text").getAsString();
+            else if (msg.has("caption"))
+                text = msg.get("caption").getAsString();
+
+            if (!isChannel) {
+                // In Gruppen/DMs: Wizard oder Command
+                if (!text.isEmpty() && wizard != null && wizard.isActive(chatId)) {
                     wizard.handleInput(chatId, text);
-                    // Wizard Inputs auch löschen? Optional:
-                    deleteMessage(chatId, messageId);
-                    return;
+                } else if (!text.isEmpty()) {
+                    handleCommand(text, chatId, threadId);
                 }
 
-                handleCommand(text, chatId);
-
-                // SOFORT NACH BEFEHLSVERARBEITUNG: User-Nachricht löschen
+                // IMMER löschen (außer in Channels), um den Chat sauber zu halten
                 deleteMessage(chatId, messageId);
+            } else {
+                // In Channels: Nur Commands (kein Wizard, kein Löschen von Posts)
+                if (!text.isEmpty()) {
+                    handleCommand(text, chatId, threadId);
+                }
             }
         }
 
@@ -115,63 +175,106 @@ public class TelegramListenerService extends Thread {
         String data = callback.has("data") ? callback.get("data").getAsString() : "";
         JsonObject msg = callback.getAsJsonObject("message");
         long chatId = msg.getAsJsonObject("chat").get("id").getAsLong();
+
+        if (!isChatAllowed(chatId)) {
+            logger.debug("Ignoring callback from unauthorized chat: {}", chatId);
+            return;
+        }
+
         long messageId = msg.get("message_id").getAsLong();
 
         if ("CLOSE".equals(data)) {
-            // Nachricht sofort löschen
             deleteMessage(chatId, messageId);
-            // Callback beantworten (Ladekreis entfernen)
             answerCallbackQuery(id, "Geschlossen");
         }
     }
 
-    private void handleCommand(String text, long chatId) {
+    private void handleCommand(String text, long chatId, Integer threadId) {
         String[] parts = text.split(" ");
         String cmd = parts[0].toLowerCase();
+        String[] args = (parts.length > 1) ? Arrays.copyOfRange(parts, 1, parts.length) : new String[0];
 
-        if (commandRegistry.containsKey(cmd)) {
-            String[] args = Arrays.copyOfRange(parts, 1, parts.length);
-            commandRegistry.get(cmd).handle(chatId, cmd, args);
+        // 1. Zuerst in der lokalen Plugin-Registry schauen
+        if (localRegistry.containsKey(cmd)) {
+            localRegistry.get(cmd).handle(chatId, threadId, cmd, args);
             return;
         }
 
-        if (cmd.equals("/dl")) {
-            if (wizard != null && parts.length == 1) {
-                wizard.startDlWizard(chatId);
-                return;
-            }
-            if (parts.length > 2) {
-                try {
-                    int amount = Integer.parseInt(parts[1]);
-                    String query = parts[2];
-                    QueueTask task = new QueueTask("SEARCH_BATCH");
-                    task.addParameter("query", query);
-                    task.addParameter("amount", amount);
-                    task.addParameter("source", "party");
-                    task.addParameter("chatId", chatId);
-                    kernel.getQueueManager().addTask(task);
-                    sendText(chatId, "✅ Task gestartet: " + query);
-                } catch (Exception e) {
-                    sendText(chatId, "⚠️ Syntax: /dl [Anzahl] [Query]");
-                }
-            }
-        } else if (cmd.equals("/status")) {
-            sendText(chatId, "🟢 <b>System Online</b>\nQueue Size: " + kernel.getQueueManager().getQueueSize());
+        // 2. Dann in der globalen Kernel-Registry schauen (wenn vorhanden)
+        if (kernelRegistryReference != null && kernelRegistryReference.containsKey(cmd)) {
+            kernelRegistryReference.get(cmd).handle(chatId, threadId, cmd, args);
+            return;
+        }
+
+        // 3. Fallback for other hardcoded commands
+        if (cmd.equals("/status")) {
+            // Falls /status nicht im Kernel registriert ist, hier ein Fallback
+            sendText(chatId, threadId,
+                    "🟢 <b>System Online</b>\nQueue Size: " + kernel.getQueueManager().getQueueSize());
         }
     }
 
-    /**
-     * Sendet Text mit einem "Schließen"-Button und plant automatische Löschung.
-     */
     public void sendText(long chatId, String text) {
+        sendText(chatId, null, text);
+    }
+
+    public long sendTextAndGetId(long chatId, String text) {
+        return sendTextAndGetId(chatId, null, text);
+    }
+
+    public long sendTextAndGetId(long chatId, Integer threadId, String text) {
         try {
-            // JSON Body bauen für POST Request (mit Inline Keyboard)
             JsonObject json = new JsonObject();
             json.addProperty("chat_id", chatId);
+            if (threadId != null) {
+                json.addProperty("message_thread_id", threadId);
+            }
             json.addProperty("text", text);
             json.addProperty("parse_mode", "HTML");
 
-            // Keyboard hinzufügen
+            // No buttons for status messages usually, or add if needed
+            // For now, simple text
+
+            String url = String.format(API_BASE + "sendMessage", botToken);
+            String response = HttpUtils.postJson(url, json.toString());
+
+            if (response != null) {
+                JsonObject respRoot = JsonParser.parseString(response).getAsJsonObject();
+                if (respRoot.get("ok").getAsBoolean()) {
+                    return respRoot.getAsJsonObject("result").get("message_id").getAsLong();
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Failed to send text to {}", chatId, e);
+        }
+        return -1;
+    }
+
+    public void editMessageText(long chatId, long messageId, String text) {
+        try {
+            JsonObject json = new JsonObject();
+            json.addProperty("chat_id", chatId);
+            json.addProperty("message_id", messageId);
+            json.addProperty("text", text);
+            json.addProperty("parse_mode", "HTML");
+
+            String url = String.format(API_BASE + "editMessageText", botToken);
+            HttpUtils.postJson(url, json.toString());
+        } catch (Exception e) {
+            logger.error("Failed to edit message {} in {}", messageId, chatId, e);
+        }
+    }
+
+    public void sendText(long chatId, Integer threadId, String text) {
+        try {
+            JsonObject json = new JsonObject();
+            json.addProperty("chat_id", chatId);
+            if (threadId != null) {
+                json.addProperty("message_thread_id", threadId);
+            }
+            json.addProperty("text", text);
+            json.addProperty("parse_mode", "HTML");
+
             JsonObject inlineKeyboard = new JsonObject();
             JsonArray rows = new JsonArray();
             JsonArray row = new JsonArray();
@@ -187,14 +290,11 @@ public class TelegramListenerService extends Thread {
             String url = String.format(API_BASE + "sendMessage", botToken);
             String response = HttpUtils.postJson(url, json.toString());
 
-            // Message ID auslesen für Auto-Delete
             if (response != null) {
                 JsonObject respRoot = JsonParser.parseString(response).getAsJsonObject();
                 if (respRoot.get("ok").getAsBoolean()) {
                     long msgId = respRoot.getAsJsonObject("result").get("message_id").getAsLong();
-
-                    // Auto-Delete nach 60 Sekunden planen
-                    scheduler.schedule(() -> deleteMessage(chatId, msgId), 60, TimeUnit.SECONDS);
+                    scheduler.schedule(() -> deleteMessage(chatId, msgId), 10, TimeUnit.SECONDS);
                 }
             }
 
@@ -205,7 +305,6 @@ public class TelegramListenerService extends Thread {
 
     public void deleteMessage(long chatId, long messageId) {
         try {
-            // Löschen via POST
             JsonObject json = new JsonObject();
             json.addProperty("chat_id", chatId);
             json.addProperty("message_id", messageId);

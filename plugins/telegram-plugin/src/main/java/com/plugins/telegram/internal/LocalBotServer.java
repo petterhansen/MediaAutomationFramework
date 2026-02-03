@@ -1,4 +1,4 @@
-package internal;
+package com.plugins.telegram.internal;
 
 import com.framework.common.util.OsUtils;
 import com.framework.core.Kernel;

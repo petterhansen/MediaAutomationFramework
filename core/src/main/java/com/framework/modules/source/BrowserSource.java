@@ -45,11 +45,14 @@ public class BrowserSource implements MediaSource {
                     fileName,
                     url,
                     null,
-                    ""
-            );
+                    "");
 
             // PipelineItem erstellen
             PipelineItem pipeItem = new PipelineItem(item.fileUrl(), item.originalFileName(), task);
+
+            // Add metadata for database tracking
+            pipeItem.getMetadata().put("source", "browser");
+            pipeItem.getMetadata().put("creator", folder != null ? folder : "web");
 
             // --- NEU: Header Injection ---
             if ((cookies != null && !cookies.isEmpty()) || (referer != null && !referer.isEmpty())) {
@@ -67,7 +70,8 @@ public class BrowserSource implements MediaSource {
                 }
 
                 // User-Agent ist auch oft nützlich, falls im Task vorhanden, sonst Standard
-                headers.put("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+                headers.put("User-Agent",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
                 // Metadaten setzen, die der Kernel im DownloadHandler ausliest
                 pipeItem.getMetadata().put("headers", headers);
@@ -79,9 +83,11 @@ public class BrowserSource implements MediaSource {
     }
 
     private String extractFilename(String url) {
-        if (url == null) return "unknown_" + System.currentTimeMillis();
+        if (url == null)
+            return "unknown_" + System.currentTimeMillis();
         String f = url.substring(url.lastIndexOf('/') + 1);
-        if (f.contains("?")) f = f.substring(0, f.indexOf("?"));
+        if (f.contains("?"))
+            f = f.substring(0, f.indexOf("?"));
         // Decode URL encoding if necessary, basic cleanup
         return f;
     }

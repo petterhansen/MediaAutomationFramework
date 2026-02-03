@@ -1,93 +1,52 @@
 package com.framework;
 
 import com.framework.core.Kernel;
+import com.framework.core.config.ConfigValidator;
+import com.framework.services.database.HistoryMigration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-
+/**
+ * Main entry point for MediaAutomationFramework
+ * Optimized for Raspberry Pi 5 and Windows systems
+ */
 public class Main {
-    // Logger erst initialisieren NACHDEM Streams umgebogen wurden (Trick 17)
-    private static Logger logger;
+    private static final Logger logger = LoggerFactory.getLogger(Main.class);
 
     public static void main(String[] args) {
-        setupGlobalLogging();
-
-        logger = LoggerFactory.getLogger(Main.class);
         logger.info("🚀 Starting MediaAutomationFramework...");
-        logger.info("📄 Log File: logs/latest.log (und session-*.log)");
+        logger.info("📁 Working Directory: {}", new java.io.File(".").getAbsolutePath());
+        logger.info("📄 Logs: logs/framework.log and logs/latest.log");
 
         try {
-            Kernel.getInstance().start();
-            logger.info("Service running. Joining main thread.");
+            // Get kernel instance
+            Kernel kernel = Kernel.getInstance();
+
+            // Validate configuration
+            logger.info("🔍 Validating configuration...");
+            ConfigValidator validator = new ConfigValidator();
+            validator.validateAndReport(kernel.getConfigManager().getConfig());
+
+            // Migrate legacy history if needed
+            HistoryMigration.migrate(kernel);
+
+            // Start kernel
+            kernel.start();
+
+            logger.info("✅ Framework started successfully");
+            logger.info("🌐 Web Dashboard: http://localhost:6875");
+            logger.info("📱 Telegram Bot: {}",
+                    kernel.getConfigManager().getConfig().telegramEnabled ? "Enabled" : "Disabled");
+
+            // Keep main thread alive
             Thread.currentThread().join();
+
         } catch (InterruptedException e) {
-            logger.warn("Main thread interrupted. Exiting...");
+            logger.warn("⚠️  Main thread interrupted. Shutting down...");
             Thread.currentThread().interrupt();
         } catch (Exception e) {
-            logger.error("CRITICAL FAILURE during startup", e);
-            e.printStackTrace(); // Sicherheitshalber auch direkt printen
+            logger.error("❌ CRITICAL FAILURE during startup", e);
             System.exit(1);
-        }
-    }
-
-    /**
-     * Leitet System.out und System.err in Dateien um, BEVOR irgendwas anderes passiert.
-     */
-    private static void setupGlobalLogging() {
-        try {
-            File logDir = new File("logs");
-            if (!logDir.exists()) logDir.mkdirs();
-
-            String timeStamp = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(new Date());
-            File sessionLog = new File(logDir, "session-" + timeStamp + ".log");
-            File latestLog = new File(logDir, "latest.log");
-
-            // Streams erstellen
-            FileOutputStream sessionStream = new FileOutputStream(sessionLog);
-            FileOutputStream latestStream = new FileOutputStream(latestLog); // Überschreibt latest.log
-
-            // Multi-Writer: Konsole + SessionFile + LatestFile
-            MultiOutputStream multiOut = new MultiOutputStream(System.out, sessionStream, latestStream);
-            MultiOutputStream multiErr = new MultiOutputStream(System.err, sessionStream, latestStream);
-
-            // Umleiten
-            System.setOut(new PrintStream(multiOut, true, "UTF-8"));
-            System.setErr(new PrintStream(multiErr, true, "UTF-8"));
-
-        } catch (Exception e) {
-            System.err.println("FATAL: Konnte Logging nicht initialisieren: " + e.getMessage());
-        }
-    }
-
-    // Helper Klasse um Output an mehrere Ziele zu senden (Tee-Prinzip)
-    static class MultiOutputStream extends OutputStream {
-        private final OutputStream[] streams;
-
-        public MultiOutputStream(OutputStream... streams) {
-            this.streams = streams;
-        }
-
-        @Override
-        public void write(int b) throws IOException {
-            for (OutputStream s : streams) s.write(b);
-        }
-
-        @Override
-        public void write(byte[] b, int off, int len) throws IOException {
-            for (OutputStream s : streams) s.write(b, off, len);
-        }
-
-        @Override
-        public void flush() throws IOException {
-            for (OutputStream s : streams) s.flush();
-        }
-
-        @Override
-        public void close() throws IOException {
-            for (OutputStream s : streams) s.close();
         }
     }
 }

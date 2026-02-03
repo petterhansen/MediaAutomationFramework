@@ -37,3 +37,7 @@ build/
 
 ### Mac OS ###
 .DS_Store
+core/tools/auth.json
+core/tools/config.json
+core/tools/framework.db.mv.db
+core/tools/stats.json

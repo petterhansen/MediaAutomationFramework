@@ -1,3 +1,5 @@
+package com.plugins.dashboard;
+
 import com.framework.api.MediaPlugin;
 import com.framework.core.Kernel;
 import com.plugins.dashboard.internal.DashboardServer; // Liegt jetzt intern im Plugin

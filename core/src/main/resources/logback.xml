@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- Console Appender -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+    
+    <!-- Rolling File Appender (optimized for Raspberry Pi) -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/framework.log</file>
+        
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <!-- Daily rollover -->
+            <fileNamePattern>logs/framework-%d{yyyy-MM-dd}.log</fileNamePattern>
+            
+            <!-- Keep 14 days of history (lighter for Pi SD card) -->
+            <maxHistory>14</maxHistory>
+            
+            <!-- Total size cap: 500MB (conserve Pi storage) -->
+            <totalSizeCap>500MB</totalSizeCap>
+        </rollingPolicy>
+        
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+        
+        <!-- Async writing to reduce I/O blocking on Pi -->
+        <immediateFlush>false</immediateFlush>
+    </appender>
+    
+    <!-- Latest log file (symlink-like behavior) -->
+    <appender name="LATEST" class="ch.qos.logback.core.FileAppender">
+        <file>logs/latest.log</file>
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+    
+    <!-- Root Logger Configuration -->
+    <root level="INFO">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="FILE" />
+        <appender-ref ref="LATEST" />
+    </root>
+    
+    <!-- Framework Debug Logging (can be set to DEBUG for troubleshooting) -->
+    <logger name="com.framework" level="INFO" />
+    <logger name="com.plugins" level="INFO" />
+    
+    <!-- Quiet down verbose third-party libraries -->
+    <logger name="org.jdbi" level="WARN" />
+    <logger name="com.h2database" level="WARN" />
+</configuration>
