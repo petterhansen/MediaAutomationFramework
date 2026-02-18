@@ -219,6 +219,24 @@ public class DatabaseService {
         });
     }
 
+    public long getTotalBytes() {
+        return jdbi.withHandle(handle -> {
+            Long sum = handle.createQuery("SELECT SUM(file_size) FROM media_items WHERE file_size > 0")
+                    .mapTo(Long.class)
+                    .one();
+            return sum != null ? sum : 0L;
+        });
+    }
+
+    public double getTotalDuration() {
+        return jdbi.withHandle(handle -> {
+            Double sum = handle.createQuery("SELECT SUM(duration) FROM media_items WHERE duration > 0")
+                    .mapTo(Double.class)
+                    .one();
+            return sum != null ? sum : 0.0;
+        });
+    }
+
     /**
      * Shutdown database cleanly
      */
@@ -229,11 +247,13 @@ public class DatabaseService {
         public long total;
         public long images;
         public long videos;
+        public long lastActive;
 
-        public CreatorStatsDTO(long total, long images, long videos) {
+        public CreatorStatsDTO(long total, long images, long videos, long lastActive) {
             this.total = total;
             this.images = images;
             this.videos = videos;
+            this.lastActive = lastActive;
         }
     }
 
@@ -247,7 +267,8 @@ public class DatabaseService {
                     """
                                 SELECT creator, COUNT(*) as total,
                                        SUM(CASE WHEN file_name LIKE '%.mp4' OR file_name LIKE '%.webm' THEN 1 ELSE 0 END) as videos,
-                                       SUM(CASE WHEN file_name LIKE '%.jpg' OR file_name LIKE '%.png' OR file_name LIKE '%.jpeg' THEN 1 ELSE 0 END) as images
+                                       SUM(CASE WHEN file_name LIKE '%.jpg' OR file_name LIKE '%.png' OR file_name LIKE '%.jpeg' THEN 1 ELSE 0 END) as images,
+                                       MAX(created_at) as last_active
                                 FROM media_items
                                 WHERE creator IS NOT NULL
                                 GROUP BY creator
@@ -257,8 +278,10 @@ public class DatabaseService {
                         long total = rs.getLong("total");
                         long videos = rs.getLong("videos");
                         long images = rs.getLong("images");
+                        java.sql.Timestamp ts = rs.getTimestamp("last_active");
+                        long lastActive = ts != null ? ts.getTime() : 0;
                         return new java.util.AbstractMap.SimpleEntry<>(creator,
-                                new CreatorStatsDTO(total, images, videos));
+                                new CreatorStatsDTO(total, images, videos, lastActive));
                     })
                     .list()
                     .forEach(entry -> stats.put(entry.getKey(), entry.getValue()));

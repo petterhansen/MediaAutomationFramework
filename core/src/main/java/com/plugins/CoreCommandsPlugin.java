@@ -48,13 +48,17 @@ public class CoreCommandsPlugin implements MediaPlugin {
         kernel.registerCommand("/clean", this::handleClean);
         kernel.registerCommand("/log", this::handleLog);
 
+        // Local Files / Upload
+        kernel.registerCommand("/local", this::handleLocal);
+        kernel.registerCommand("/upload", this::handleLocal);
+
         // shortcuts removed - moved to plugins
 
         // Info für Settings
         kernel.getConfigManager().getConfig().setPluginSetting(
                 getName(),
                 "commands_info",
-                "/help, /status, /queue, /log, /clean");
+                "/help, /status, /queue, /log, /clean, /local");
         kernel.getConfigManager().saveConfig();
     }
 
@@ -159,7 +163,48 @@ public class CoreCommandsPlugin implements MediaPlugin {
 
     private void handleStop(long id, Integer threadId, String c, String[] a) {
         send(id, threadId, "🛑 System stoppt...");
-        System.exit(0);
+
+        // Spawn a new thread to exit after a delay, allowing the listener to
+        // acknowledge the update
+        new Thread(() -> {
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+            }
+            logger.info("Shutdown requested via Telegram. Exiting...");
+            System.exit(0);
+        }).start();
+    }
+
+    private void handleLocal(long id, Integer threadId, String c, String[] a) {
+        if (a.length < 1) {
+            send(id, threadId, "⚠️ Syntax: <code>/local [FolderName] [Amount optional]</code>");
+            return;
+        }
+
+        String folder = a[0];
+        int amount = -1;
+        if (a.length > 1) {
+            try {
+                amount = Integer.parseInt(a[1]);
+            } catch (Exception e) {
+            }
+        }
+
+        // We use the new QueueTask constructor and manually set parameters matching
+        // LocalTaskExecutor expectations
+        com.framework.core.queue.QueueTask task = new com.framework.core.queue.QueueTask("LOCAL_BATCH");
+        task.addParameter("folder", folder);
+        task.addParameter("amount", amount);
+        task.addParameter("initiatorChatId", String.valueOf(id));
+        if (threadId != null)
+            task.addParameter("initiatorThreadId", String.valueOf(threadId));
+
+        // Use folder name as title for dashboard
+        task.addParameter("name", "#" + folder);
+
+        kernel.getQueueManager().addTask(task);
+        send(id, threadId, "📂 <b>Local Upload started:</b> " + escape(folder));
     }
 
     // Shortcuts Logic removed - moved to plugins

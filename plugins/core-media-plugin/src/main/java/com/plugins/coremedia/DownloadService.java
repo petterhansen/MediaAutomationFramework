@@ -4,6 +4,8 @@ import com.framework.core.Kernel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.framework.common.util.OsUtils;
+
 import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -19,7 +21,8 @@ public class DownloadService {
     public DownloadService(Kernel kernel) {
         String t = kernel.getConfigManager().getConfig().tempDir;
         this.tempDir = new File(t != null ? t : "temp");
-        if (!tempDir.exists()) tempDir.mkdirs();
+        if (!tempDir.exists())
+            tempDir.mkdirs();
     }
 
     public DownloadService(File tempDir) {
@@ -31,32 +34,45 @@ public class DownloadService {
         if (folderName != null && !folderName.isEmpty()) {
             targetDir = new File(targetDir, folderName.replaceAll("[^a-zA-Z0-9._-]", "_"));
         }
-        if (!targetDir.exists()) targetDir.mkdirs();
+        if (!targetDir.exists())
+            targetDir.mkdirs();
 
         File targetFile = new File(targetDir, fileName);
-        if (targetFile.exists() && targetFile.length() > 0) return targetFile;
+        if (targetFile.exists() && targetFile.length() > 0)
+            return targetFile;
 
-        File ariaExe = new File("tools/aria2c.exe");
-        boolean ariaAvailable = ariaExe.exists();
+        String ariaCmd = OsUtils.getAria2Command();
+        boolean ariaAvailable = isAriaAvailable(ariaCmd);
 
         if (ariaAvailable) {
-            boolean success = performAriaDownload(ariaExe, url, targetDir, fileName, headers);
-            if (success) return targetFile;
+            boolean success = performAriaDownload(ariaCmd, url, targetDir, fileName, headers);
+            if (success)
+                return targetFile;
 
             // LOGGING UPDATE: URL anzeigen
             logger.warn("⚠️ Aria2 fehlgeschlagen für URL: {} | Versuche Java-Fallback für: {}", url, fileName);
         } else {
-            logger.warn("⚠️ Aria2 nicht gefunden. Nutze Java-Downloader.");
+            logger.warn("⚠️ Aria2 nicht gefunden (CMD: {}). Nutze Java-Downloader.", ariaCmd);
         }
 
         // --- FALLBACK ---
         return performJavaDownload(url, targetFile, headers);
     }
 
-    private boolean performAriaDownload(File exe, String url, File dir, String file, Map<String, String> headers) {
+    private boolean isAriaAvailable(String cmd) {
+        try {
+            // Quick check: aria2c --version
+            Process p = new ProcessBuilder(cmd, "--version").start();
+            return p.waitFor() == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean performAriaDownload(String exe, String url, File dir, String file, Map<String, String> headers) {
         try {
             List<String> command = new ArrayList<>();
-            command.add(exe.getAbsolutePath());
+            command.add(exe);
             command.add("--dir=" + dir.getAbsolutePath());
             command.add("--out=" + file);
             command.add("--split=4");
@@ -82,7 +98,8 @@ public class DownloadService {
                 String line;
                 while ((line = br.readLine()) != null) {
                     // Optional: Aria2 Output bei Fehlern auch loggen
-                    if (line.toLowerCase().contains("error")) logger.debug("Aria2 Output: " + line);
+                    if (line.toLowerCase().contains("error"))
+                        logger.debug("Aria2 Output: " + line);
                 }
             }
 
@@ -106,8 +123,10 @@ public class DownloadService {
             conn.setRequestProperty("User-Agent", USER_AGENT);
 
             if (headers != null) {
-                if (headers.containsKey("Referer")) conn.setRequestProperty("Referer", headers.get("Referer"));
-                if (headers.containsKey("Cookie")) conn.setRequestProperty("Cookie", headers.get("Cookie"));
+                if (headers.containsKey("Referer"))
+                    conn.setRequestProperty("Referer", headers.get("Referer"));
+                if (headers.containsKey("Cookie"))
+                    conn.setRequestProperty("Cookie", headers.get("Cookie"));
             }
 
             int responseCode = conn.getResponseCode();
@@ -118,7 +137,7 @@ public class DownloadService {
             }
 
             try (InputStream in = conn.getInputStream();
-                 FileOutputStream out = new FileOutputStream(targetFile)) {
+                    FileOutputStream out = new FileOutputStream(targetFile)) {
                 byte[] buffer = new byte[8192];
                 int count;
                 while ((count = in.read(buffer)) != -1) {

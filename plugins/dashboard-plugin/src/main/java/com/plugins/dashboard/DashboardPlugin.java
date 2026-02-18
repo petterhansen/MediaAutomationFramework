@@ -8,20 +8,30 @@ public class DashboardPlugin implements MediaPlugin {
     private DashboardServer server;
 
     @Override
-    public String getName() { return "WebDashboard"; }
+    public String getName() {
+        return "WebDashboard";
+    }
+
     @Override
-    public String getVersion() { return "1.0.0"; }
+    public String getVersion() {
+        return "1.0.0";
+    }
 
     @Override
     public void onEnable(Kernel kernel) {
         // Server starten
         this.server = new DashboardServer(kernel);
         this.server.start();
+
+        // Register DashboardServer as a service so other plugins can add routes
+        kernel.registerService(DashboardServer.class, this.server);
+
         System.out.println("🔌 WebDashboard Plugin gestartet (Port 6875).");
     }
 
     @Override
     public void onDisable() {
-        if (this.server != null) this.server.stop();
+        if (this.server != null)
+            this.server.stop();
     }
 }

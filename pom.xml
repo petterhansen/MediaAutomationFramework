@@ -10,9 +10,21 @@
   </organization>
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <maven.compiler.target>17</maven.compiler.target>
-    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.release>17</maven.compiler.release>
   </properties>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.11.0</version>
+        <configuration>
+          <release>17</release>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
   <modules>
     <module>core</module>
     <module>plugins/booru-plugin</module>
@@ -23,5 +35,8 @@
     <module>plugins/telegram-plugin</module>
     <module>plugins/youtube-plugin</module>
     <module>plugins/media-safety-plugin</module>
+    <module>plugins/manga-plugin</module>
+    <module>plugins/tiktok-plugin</module>
+    <module>plugins/socials-plugin</module>
   </modules>
 </project>

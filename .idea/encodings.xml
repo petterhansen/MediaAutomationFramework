@@ -1,6 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="Encoding">
+    <file url="file://$PROJECT_DIR$/core/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/core/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/booru-plugin/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/booru-plugin/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/core-media-plugin/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/core-media-plugin/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/dashboard-plugin/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/dashboard-plugin/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/download-cmd-plugin/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/download-cmd-plugin/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/media-safety-plugin/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/media-safety-plugin/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/party-plugin/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/party-plugin/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/telegram-plugin/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/telegram-plugin/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/youtube-plugin/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/youtube-plugin/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/src/main/java" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/src/main/resources" charset="UTF-8" />
   </component>

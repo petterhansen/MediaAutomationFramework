@@ -2,28 +2,29 @@ package com.plugins.telegram.internal;
 
 import com.framework.api.MediaSink;
 import com.framework.core.pipeline.PipelineItem;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonObject;
+import com.plugins.telegram.internal.TelegramUploader.MediaItem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class TelegramSink implements MediaSink {
     private static final Logger logger = LoggerFactory.getLogger(TelegramSink.class);
-    private final String botToken;
     private final String targetChatId;
     private final String apiBase;
+    private final TelegramUploader uploader;
 
     public TelegramSink(String botToken, String chatId, String apiUrlPattern) {
-        this.botToken = botToken;
         this.targetChatId = chatId;
         this.apiBase = (apiUrlPattern != null ? apiUrlPattern : "http://localhost:8081/bot%s/%s");
+        this.uploader = new TelegramUploader(botToken, this.apiBase);
     }
 
     @Override
@@ -69,150 +70,117 @@ public class TelegramSink implements MediaSink {
                 caption = "#" + item.getOriginalName();
         }
 
+        // Probe all files to get metadata
+        List<MediaItem> mediaItems = new ArrayList<>();
+        for (File f : files) {
+            mediaItems.add(probeFile(f));
+        }
+
+        // Album (MediaGroup) nur senden, wenn > 1 Datei UND <= 10
         // Album (MediaGroup) nur senden, wenn > 1 Datei UND <= 10
         if (files.size() > 1 && files.size() <= 10) {
-            sendMediaGroup(files, caption, actualTargetChatId, actualThreadId);
+            String finalChat = actualTargetChatId;
+            Integer finalThread = actualThreadId;
+            String finalCaption = caption;
+
+            executeWithRetry(() -> uploader.uploadMediaGroup(mediaItems, finalCaption, finalChat, finalThread));
         } else {
             // Einzeln senden
-            for (File f : files) {
-                uploadFile(f, caption, actualTargetChatId, actualThreadId);
-                Thread.sleep(1000); // Rate Limit Schutz
+            for (MediaItem mi : mediaItems) {
+                String finalChat = actualTargetChatId;
+                Integer finalThread = actualThreadId;
+                String finalCaption = caption;
+
+                if (mi.isVideo()) {
+                    executeWithRetry(
+                            () -> uploader.uploadVideo(mi.file(), mi.thumbnail(), finalCaption, finalChat, finalThread,
+                                    mi.width(), mi.height(), mi.duration()));
+                } else if (isImage(mi.file())) {
+                    executeWithRetry(() -> uploader.uploadPhoto(mi.file(), finalCaption, finalChat, finalThread));
+                } else {
+                    executeWithRetry(() -> uploader.uploadDocument(mi.file(), finalCaption, finalChat, finalThread,
+                            mi.thumbnail()));
+                }
+
+                try {
+                    Thread.sleep(1000); // Rate Limit Schutz
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted during batch waiting", ie);
+                }
             }
         }
         return null;
     }
 
-    private void uploadFile(File file, String caption, String chatId, Integer threadId) {
-        // Versuch 1: Als Foto oder Video senden
+    private MediaItem probeFile(File input) {
+        File thumb = new File(input.getAbsolutePath() + ".thumb.jpg");
+        if (!thumb.exists())
+            thumb = null;
+
+        if (!isVideo(input)) {
+            return new MediaItem(input, thumb, 0, 0, 0, false);
+        }
+
         try {
-            String method;
-            String field;
-
-            if (isVideo(file)) {
-                method = "sendVideo";
-                field = "video";
-            } else if (isImage(file)) {
-                // FIX: Bilder explizit als Photo senden
-                method = "sendPhoto";
-                field = "photo";
-            } else {
-                method = "sendDocument";
-                field = "document";
+            // COPY OF ROBUST PROBING LOGIC FROM TranscoderService / MediaProcessor
+            String ffmpegCmd = "ffmpeg"; // Assume in PATH or handled by OS
+            if (System.getProperty("os.name").toLowerCase().contains("win")) {
+                ffmpegCmd = "ffmpeg.exe";
+                // Try to find in tools/ if possible, but simplest is to assume PATH for now or
+                // relative
+                if (new File("tools/ffmpeg.exe").exists())
+                    ffmpegCmd = "tools/ffmpeg.exe";
             }
 
-            performMultipartUpload(method, field, file, caption, false, null, chatId, threadId);
+            ProcessBuilder pb = new ProcessBuilder(ffmpegCmd, "-i", input.getAbsolutePath());
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
 
-        } catch (Exception e) {
-            logger.warn("Standard upload failed for {}, trying fallback to document...", file.getName());
-            // Fallback: Als Dokument senden, wenn sendPhoto/Video fehlschlägt
-            try {
-                performMultipartUpload("sendDocument", "document", file, caption, false, null, chatId, threadId);
-            } catch (Exception ex) {
-                logger.error("Final upload failed for {}", file.getName(), ex);
-            }
-        }
-    }
+            int width = 0;
+            int height = 0;
+            double duration = 0;
 
-    private void sendMediaGroup(List<File> files, String caption, String chatId, Integer threadId) {
-        try {
-            // Nur gültige Medien für Group filtern
-            List<File> validFiles = files.stream().filter(f -> isVideo(f) || isImage(f)).toList();
-            if (validFiles.isEmpty())
-                return;
+            // Regex from predecessor
+            Pattern resPattern = Pattern.compile("Video:.*,\\s(\\d{2,5})x(\\d{2,5})");
+            Pattern durPattern = Pattern.compile("Duration: (\\d{2}):(\\d{2}):(\\d{2})\\.(\\d{2})");
 
-            if (validFiles.size() == 1) {
-                uploadFile(validFiles.get(0), caption, chatId, threadId);
-                return;
-            }
-
-            performMultipartUpload("sendMediaGroup", "media", null, caption, true, validFiles, chatId, threadId);
-        } catch (Exception e) {
-            logger.error("Group upload failed", e);
-        }
-    }
-
-    private void performMultipartUpload(String method, String fileField, File singleFile, String caption,
-            boolean isGroup, List<File> groupFiles, String chatId, Integer threadId) throws IOException {
-        String boundary = "---" + UUID.randomUUID();
-        URL url = new URL(String.format(apiBase, botToken, method));
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setDoOutput(true);
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-
-        try (OutputStream output = conn.getOutputStream();
-                PrintWriter writer = new PrintWriter(new OutputStreamWriter(output, StandardCharsets.UTF_8), true)) {
-
-            addFormField(writer, boundary, "chat_id", chatId);
-            if (threadId != null) {
-                addFormField(writer, boundary, "message_thread_id", String.valueOf(threadId));
-            }
-
-            if (isGroup) {
-                JsonArray mediaArr = new JsonArray();
-                for (int i = 0; i < groupFiles.size(); i++) {
-                    File f = groupFiles.get(i);
-                    JsonObject obj = new JsonObject();
-                    obj.addProperty("type", isVideo(f) ? "video" : "photo");
-                    obj.addProperty("media", "attach://file" + i);
-                    if (i == 0 && caption != null)
-                        obj.addProperty("caption", caption);
-                    mediaArr.add(obj);
-                }
-                addFormField(writer, boundary, "media", mediaArr.toString());
-                for (int i = 0; i < groupFiles.size(); i++)
-                    attachFile(writer, output, boundary, "file" + i, groupFiles.get(i));
-            } else {
-                if (caption != null)
-                    addFormField(writer, boundary, "caption", caption);
-                attachFile(writer, output, boundary, fileField, singleFile);
-            }
-
-            writer.append("--").append(boundary).append("--\r\n").flush();
-        }
-
-        int code = conn.getResponseCode();
-        if (code != 200) {
-            String err = readError(conn);
-            logger.warn("TG Error {}: {} | {}", code, method, err);
-            throw new IOException("API Error " + code); // Wirf Exception für Fallback
-        } else {
-            logger.info("TG Upload OK ({})", method);
-        }
-    }
-
-    private void addFormField(PrintWriter writer, String boundary, String name, String value) {
-        writer.append("--").append(boundary).append("\r\n").append("Content-Disposition: form-data; name=\"")
-                .append(name).append("\"\r\n\r\n").append(value).append("\r\n");
-    }
-
-    private void attachFile(PrintWriter writer, OutputStream output, String boundary, String name, File file)
-            throws IOException {
-        writer.append("--").append(boundary).append("\r\n").append("Content-Disposition: form-data; name=\"")
-                .append(name).append("\"; filename=\"").append(file.getName()).append("\"\r\n")
-                .append("Content-Type: application/octet-stream\r\n\r\n").flush();
-        try (FileInputStream fis = new FileInputStream(file)) {
-            fis.transferTo(output);
-        }
-        writer.append("\r\n").flush();
-    }
-
-    private String readError(HttpURLConnection conn) {
-        try {
-            InputStream es = conn.getErrorStream();
-            if (es == null)
-                return "No error stream available";
-
-            try (BufferedReader r = new BufferedReader(new InputStreamReader(es))) {
-                StringBuilder sb = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
                 String line;
-                while ((line = r.readLine()) != null)
-                    sb.append(line);
-                return sb.toString();
+                while ((line = reader.readLine()) != null) {
+                    Matcher mRes = resPattern.matcher(line);
+                    if (mRes.find()) {
+                        width = Integer.parseInt(mRes.group(1));
+                        height = Integer.parseInt(mRes.group(2));
+                    }
+                    Matcher mDur = durPattern.matcher(line);
+                    if (mDur.find()) {
+                        duration = (Integer.parseInt(mDur.group(1)) * 3600L) +
+                                (Integer.parseInt(mDur.group(2)) * 60L) +
+                                Integer.parseInt(mDur.group(3));
+                        duration += Double.parseDouble("0." + mDur.group(4));
+                    }
+
+                    // Note: Rotation handling in upload is tricky.
+                    // Telegram API doesn't support "rotation" param.
+                    // Video MUST be baked (which TranscoderService now does) or we rely on client.
+                    // But we DO need to perform probing to get SWAP DIMENSIONS if rotation is
+                    // 90/270?
+                    // Yes, but standard ffmpeg output usually shows "SAR/DAR" which we might parse.
+                    // For now, we trust TranscoderService has fixed the file if needed.
+                }
             }
+            p.waitFor();
+
+            if (width > 0 && height > 0) {
+                return new MediaItem(input, thumb, width, height, (int) duration, true);
+            }
+
         } catch (Exception e) {
-            return "N/A";
+            logger.warn("Probe failed for {}: {}", input.getName(), e.getMessage());
         }
+
+        return new MediaItem(input, thumb, 0, 0, 0, true);
     }
 
     private boolean isVideo(File f) {
@@ -224,5 +192,31 @@ public class TelegramSink implements MediaSink {
         String n = f.getName().toLowerCase();
         return n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png") || n.endsWith(".webp")
                 || n.endsWith(".bmp");
+    }
+
+    @FunctionalInterface
+    private interface UploadAction {
+        void run() throws IOException;
+    }
+
+    private void executeWithRetry(UploadAction action) throws IOException {
+        int maxRetries = 5;
+        for (int i = 0; i < maxRetries; i++) {
+            try {
+                action.run();
+                return; // Success
+            } catch (TelegramRateLimitException e) {
+                long waitSeconds = e.getRetryAfterSeconds();
+                logger.warn("⚠️ Telegram Rate Limit (429). Waiting {}s before retry (attempt {}/{})",
+                        waitSeconds, i + 1, maxRetries);
+                try {
+                    Thread.sleep(waitSeconds * 1000L);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted during rate limit wait", ie);
+                }
+            }
+        }
+        throw new IOException("Max retries exceeded for Telegram upload after rate limits.");
     }
 }

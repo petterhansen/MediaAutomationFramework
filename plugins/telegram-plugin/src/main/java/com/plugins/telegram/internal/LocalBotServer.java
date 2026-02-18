@@ -16,11 +16,14 @@ public class LocalBotServer {
     private Process process;
     private final File toolsDir;
 
-    private static final String API_ID = "30838869";
-    private static final String API_HASH = "a9078242c87e536061717aa50c567a1f";
+    private static final String API_ID = ""; // Can be used as fallback if not set in config
+    private static final String API_HASH = ""; // Can be used as fallback if not set in config
     private static final int PORT = 8081;
 
+    private final Kernel kernel;
+
     public LocalBotServer(Kernel kernel) {
+        this.kernel = kernel;
         this.toolsDir = kernel.getToolsDir();
     }
 
@@ -45,15 +48,18 @@ public class LocalBotServer {
                 logger.info("Starte Local Bot API Server...");
                 OsUtils.makeExecutable(exe);
 
+                String apiId = kernel.getConfigManager().getConfig().getPluginSetting("TelegramIntegration", "apiId",
+                        API_ID);
+                String apiHash = kernel.getConfigManager().getConfig().getPluginSetting("TelegramIntegration",
+                        "apiHash", API_HASH);
+
                 ProcessBuilder pb = new ProcessBuilder(
                         exe.getAbsolutePath(),
-                        "--api-id", API_ID,
-                        "--api-hash", API_HASH,
+                        "--api-id", apiId,
+                        "--api-hash", apiHash,
                         "--local",
                         "--http-port", String.valueOf(PORT),
-                        "--verbosity", "2"
-                );
-
+                        "--verbosity", "2");
                 pb.directory(toolsDir);
                 pb.redirectErrorStream(true);
 
@@ -64,7 +70,7 @@ public class LocalBotServer {
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
-                        logger.info("[TG-Server] {}", line);
+                        logger.debug("[TG-Server] {}", line);
                     }
                 }
 
@@ -82,25 +88,42 @@ public class LocalBotServer {
     public void restart() {
         logger.warn("🔄 Führe Neustart des Local Bot API Servers durch...");
         stop();
-        try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        try {
+            Thread.sleep(3000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         start();
     }
 
     public void stop() {
         if (process != null && process.isAlive()) {
             process.destroy();
-            try { Thread.sleep(1000); if (process.isAlive()) process.destroyForcibly(); } catch (Exception e) {}
+            try {
+                Thread.sleep(1000);
+                if (process.isAlive())
+                    process.destroyForcibly();
+            } catch (Exception e) {
+            }
             logger.info("Local Bot API Server gestoppt.");
         }
     }
 
-    public boolean isProcessRunning() { return process != null && process.isAlive(); }
-
-    public boolean isApiReachable() {
-        try (Socket ignored = new Socket("localhost", PORT)) { return true; } catch (IOException e) { return false; }
+    public boolean isProcessRunning() {
+        return process != null && process.isAlive();
     }
 
-    public String getApiUrl() { return "http://localhost:" + PORT + "/bot%s/%s"; }
+    public boolean isApiReachable() {
+        try (Socket ignored = new Socket("localhost", PORT)) {
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    public String getApiUrl() {
+        return "http://localhost:" + PORT + "/bot%s/%s";
+    }
 
     private void killOrphans() {
         try {
@@ -108,8 +131,10 @@ public class LocalBotServer {
                     .filter(p -> p.info().command().isPresent())
                     .filter(p -> p.info().command().get().toLowerCase().contains("telegram-bot-api"))
                     .forEach(p -> {
-                        if (process == null || p.pid() != process.pid()) p.destroy();
+                        if (process == null || p.pid() != process.pid())
+                            p.destroy();
                     });
-        } catch (Exception e) {}
+        } catch (Exception e) {
+        }
     }
 }

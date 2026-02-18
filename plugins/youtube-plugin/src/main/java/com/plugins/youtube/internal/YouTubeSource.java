@@ -38,6 +38,14 @@ public class YouTubeSource implements TaskExecutor {
         logger.info("🎥 Starting YouTube download: {} ({})", query, type);
 
         try {
+            // FILTER: Check filetype
+            String filterType = task.getString("filetype");
+            if (filterType != null && "img".equalsIgnoreCase(filterType)) {
+                logger.warn("❌ YouTube source does not support 'img' filter (Video only). Skipping: {}", query);
+                task.setStatus(QueueTask.Status.DONE);
+                return;
+            }
+
             if ("video".equalsIgnoreCase(type)) {
                 downloadSingleVideo(query, task);
             } else if ("channel".equalsIgnoreCase(type)) {

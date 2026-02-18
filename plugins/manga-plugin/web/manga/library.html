@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rohan Library — MAF</title>
+    <meta name="description" content="Browse, search, and manage your manga collection">
+    <link rel="icon" type="image/x-icon" href="/manga/favicon.ico">
+    <link rel="stylesheet" href="/manga/css/manga.css">
+    <style>
+        .profile-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .profile-card {
+            background: var(--bg-secondary);
+            padding: 15px;
+            border-radius: 8px;
+            cursor: pointer;
+            border: 1px solid var(--border-color);
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .profile-card:hover {
+            border-color: var(--accent-color);
+            background: var(--bg-primary);
+        }
+
+        .profile-card.active {
+            border-color: var(--accent-color);
+            background: rgba(99, 102, 241, 0.1);
+        }
+
+        .profile-avatar {
+            width: 40px;
+            height: 40px;
+            background: var(--accent-color);
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            margin-right: 15px;
+        }
+
+        .navbar-profile {
+            margin-left: auto;
+            cursor: pointer;
+            padding: 5px 10px;
+            border-radius: 6px;
+        }
+
+        .navbar-profile:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .navbar-profile:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        /* NSFW Toggle */
+        .nsfw-toggle {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            padding: 5px;
+            border-radius: 4px;
+            user-select: none;
+            border: 1px solid transparent;
+        }
+
+        .nsfw-toggle:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .nsfw-toggle.active {
+            background: rgba(220, 38, 38, 0.2);
+            border-color: rgba(220, 38, 38, 0.5);
+        }
+
+        .nsfw-toggle input {
+            display: none;
+        }
+
+        .nsfw-toggle span {
+            opacity: 0.4;
+            filter: grayscale(100%);
+            transition: all 0.2s;
+            font-size: 1.2rem;
+        }
+
+        .nsfw-toggle input:checked+span {
+            opacity: 1;
+            filter: none;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- Navbar -->
+    <nav class="navbar">
+        <a href="/manga" class="navbar-brand">
+            <span class="icon">🖋️</span>
+            <span>Rohan</span>
+        </a>
+        <div class="navbar-links">
+            <!-- Public mode: no dashboard links -->
+            <div class="navbar-profile" id="nav-profile" onclick="openProfileModal()">
+                👤 <span id="current-profile-name">Guest</span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Search -->
+    <div class="search-container">
+        <div class="search-wrapper">
+            <span class="search-icon">🔍</span>
+            <input type="text" class="search-input" id="search-input" placeholder="Search manga by title..."
+                autocomplete="off">
+        </div>
+        <div class="search-controls">
+            <div class="search-control-group">
+                <label for="search-provider">Source</label>
+                <select class="search-provider-select" id="search-provider">
+                    <option value="">All Sources</option>
+                </select>
+            </div>
+            <div class="search-control-group">
+                <label for="nsfw-toggle">Sensitive Media</label>
+                <label class="nsfw-toggle" title="Show Sensitive Content" id="nsfw-label">
+                    <input type="checkbox" id="nsfw-toggle">
+                    <span>🔞</span>
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="content-area">
+
+        <!-- Search Results (hidden by default) -->
+        <div id="search-results-section" style="display:none;">
+            <h2 class="section-title">🔍 Search Results</h2>
+            <div class="manga-grid" id="search-results-grid"></div>
+        </div>
+
+        <!-- Library -->
+        <div id="library-section">
+            <h2 class="section-title">📖 Your Library</h2>
+            <div class="manga-grid" id="library-grid"></div>
+            <div class="empty-state" id="library-empty" style="display:none;">
+                <div class="icon">📚</div>
+                <h3>Your library is empty</h3>
+                <p>Search for manga above and add them to your collection!</p>
+            </div>
+        </div>
+
+        <!-- Loading -->
+        <div class="loading-spinner" id="loading" style="display:none;">
+            <div class="spinner"></div>
+            <span>Loading...</span>
+        </div>
+    </div>
+
+    <!-- Profile Modal -->
+    <div class="modal-overlay" id="profile-modal" style="z-index: 2000;">
+        <div class="modal" style="max-width: 400px; text-align: center;">
+            <h2 class="section-title">Who is reading?</h2>
+            <div id="profile-list" class="profile-list">
+                <!-- Profiles injected here -->
+            </div>
+            <div class="profile-create">
+                <input type="text" id="new-profile-name" placeholder="Enter new profile name" class="search-input"
+                    style="width: 70%; margin-right: 10px;">
+                <button class="btn btn-primary" onclick="createProfile()">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Manga Detail Modal -->
+    <div class="modal-overlay" id="detail-modal">
+        <div class="modal" style="position:relative;">
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+            <div class="modal-header">
+                <div class="modal-cover">
+                    <img id="modal-cover" src="" alt="Cover">
+                </div>
+                <div class="modal-title-area">
+                    <h2 id="modal-title"></h2>
+                    <div class="author" id="modal-author"></div>
+                    <div class="description" id="modal-description"></div>
+                    <div class="manga-card-meta" id="modal-tags"></div>
+                    <div class="modal-actions">
+                        <button class="btn btn-primary" id="modal-add-btn" onclick="addToLibrary()">
+                            ➕ Add to Library
+                        </button>
+                        <div class="dropdown">
+                            <button class="btn btn-primary" id="modal-download-btn" onclick="toggleDownloadDropdown()">
+                                📥 Download ▼
+                            </button>
+                            <div class="dropdown-menu" id="download-dropdown">
+                                <a href="#" onclick="downloadAllChapters(); toggleDownloadDropdown()">Download All</a>
+                                <a href="#" onclick="showRangeSelector(); toggleDownloadDropdown()">Select Range...</a>
+                            </div>
+                        </div>
+                        <button class="btn btn-secondary" id="modal-read-btn" onclick="startReading()">
+                            📖 Read
+                        </button>
+                    </div>
+
+                    <!-- Range Selector (Hidden) -->
+                    <div id="range-selector-container" class="range-selector-container" style="display:none;">
+                        <h4 class="range-selector-title">Select Chapter Range</h4>
+                        <div class="range-inputs">
+                            <div class="range-group">
+                                <label class="range-label">From</label>
+                                <select id="range-start" class="range-select"></select>
+                            </div>
+                            <span>➝</span>
+                            <div class="range-group">
+                                <label class="range-label">To</label>
+                                <select id="range-end" class="range-select"></select>
+                            </div>
+                        </div>
+                        <div class="range-actions">
+                            <button class="btn btn-sm btn-secondary" onclick="hideRangeSelector()">Cancel</button>
+                            <button class="btn btn-sm btn-primary" onclick="downloadRange()">Download Selection</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-body">
+                <h3 class="section-title" style="margin-top:0;">Chapters
+                    <span id="modal-chapter-count"
+                        style="font-size:0.85rem;color:var(--text-muted);font-weight:400;"></span>
+                </h3>
+                <div id="modal-chapters-loading" class="loading-spinner" style="display:none;">
+                    <div class="spinner"></div>
+                    <span>Loading chapters...</span>
+                </div>
+                <ul class="chapter-list" id="modal-chapter-list"></ul>
+            </div>
+        </div>
+
+        <!-- Toast Container -->
+        <div class="toast-container" id="toast-container"></div>
+
+        <script src="/manga/js/library.js"></script>
+</body>
+
+</html>

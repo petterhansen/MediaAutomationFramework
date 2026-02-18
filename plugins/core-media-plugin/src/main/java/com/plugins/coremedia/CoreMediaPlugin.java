@@ -35,6 +35,7 @@ public class CoreMediaPlugin implements MediaPlugin {
         this.downloadService = new DownloadService(kernel);
 
         kernel.registerService(TranscoderService.class, transcoderService);
+        kernel.registerService(com.framework.core.media.MediaTranscoder.class, transcoderService);
         kernel.registerService(DownloadService.class, downloadService);
 
         // --- DOWNLOAD HANDLER (Standard HTTP) ---
@@ -61,6 +62,35 @@ public class CoreMediaPlugin implements MediaPlugin {
             }
         });
 
+        // --- LOCAL EXECUTOR ---
+        LocalTaskExecutor localExecutor = new LocalTaskExecutor(kernel);
+        kernel.getQueueManager().registerExecutor("LOCAL_BATCH", localExecutor);
+
+        // --- LOCAL DOWNLOAD HANDLER ---
+        kernel.getPipelineManager().registerDownloadHandler(new com.framework.core.pipeline.StageHandler<>() {
+            @Override
+            public boolean supports(com.framework.core.pipeline.PipelineItem item) {
+                return item.getSourceUrl().startsWith("local://") ||
+                        Boolean.TRUE.equals(item.getMetadata().get("is_local"));
+            }
+
+            @Override
+            public File process(com.framework.core.pipeline.PipelineItem item) throws Exception {
+                // If the file is already set (by LocalTaskExecutor), just return it
+                if (item.getDownloadedFile() != null && item.getDownloadedFile().exists()) {
+                    return item.getDownloadedFile();
+                }
+
+                // Otherwise try to find it based on URL: local://Folder/File.ext
+                String path = item.getSourceUrl().replace("local://", "");
+                File f = new File("media_cache", path);
+                if (f.exists())
+                    return f;
+
+                throw new java.io.FileNotFoundException("Local file not found: " + path);
+            }
+        });
+
         // --- GEÄNDERTER PROCESSING HANDLER ---
         kernel.getPipelineManager().registerProcessingHandler(new com.framework.core.pipeline.StageHandler<>() {
             @Override
@@ -78,7 +108,28 @@ public class CoreMediaPlugin implements MediaPlugin {
 
                 // Use TranscoderService.processMedia which handles both images and videos
                 logger.info("🎬 Verarbeite Datei: {}", fileName);
-                List<File> processedFiles = transcoderService.processMedia(inputFile, false);
+
+                List<File> processedFiles;
+                if (fileName.contains("processed")) {
+                    logger.info("⏩ Datei ist bereits verarbeitet, überspringe Transcoding: {}", fileName);
+                    processedFiles = Collections.singletonList(inputFile);
+                } else {
+                    processedFiles = transcoderService.processMedia(inputFile, false);
+                }
+
+                // --- NEU: Metadaten für Telegram extrahieren ---
+                if (processedFiles != null && !processedFiles.isEmpty()) {
+                    File mainFile = processedFiles.get(0);
+                    // Nur für Videodateien prüfen
+                    String n = mainFile.getName().toLowerCase();
+                    if (n.endsWith(".mp4") || n.endsWith(".mov") || n.endsWith(".mkv")) {
+                        Map<String, Object> meta = transcoderService.getVideoMetadata(mainFile);
+                        if (!meta.isEmpty()) {
+                            item.getMetadata().putAll(meta);
+                            logger.info("📊 Video Metadata: {}", meta);
+                        }
+                    }
+                }
 
                 return processedFiles != null ? processedFiles : Collections.singletonList(inputFile);
             }

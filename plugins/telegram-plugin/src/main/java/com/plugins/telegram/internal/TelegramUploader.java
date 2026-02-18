@@ -96,6 +96,10 @@ public class TelegramUploader {
         int code = conn.getResponseCode();
         if (code != 200) {
             String err = readError(conn);
+            if (code == 429) {
+                long retryAfter = parseRetryAfter(err);
+                throw new TelegramRateLimitException(retryAfter, "Telegram Rate Limit: " + err);
+            }
             logger.error("❌ MediaGroup Upload Failed ({}): {}", code, err);
             throw new IOException("Telegram API Error " + code + ": " + err);
         } else {
@@ -174,6 +178,10 @@ public class TelegramUploader {
 
         if (code != 200) {
             String err = readError(conn);
+            if (code == 429) {
+                long retryAfter = parseRetryAfter(err);
+                throw new TelegramRateLimitException(retryAfter, "Telegram Rate Limit: " + err);
+            }
             logger.error("❌ Upload Failed ({}): {}", code, err);
             throw new IOException("Telegram API Error " + code + ": " + err);
         } else {
@@ -215,8 +223,14 @@ public class TelegramUploader {
             writer.append("--").append(boundary).append("--\r\n").flush();
         }
 
-        if (conn.getResponseCode() != 200) {
-            throw new IOException("API Error " + conn.getResponseCode() + ": " + readError(conn));
+        int code = conn.getResponseCode();
+        if (code != 200) {
+            String err = readError(conn);
+            if (code == 429) {
+                long retryAfter = parseRetryAfter(err);
+                throw new TelegramRateLimitException(retryAfter, "Telegram Rate Limit: " + err);
+            }
+            throw new IOException("API Error " + code + ": " + err);
         }
         logger.info("✅ Document Upload Successful!");
     }
@@ -247,8 +261,14 @@ public class TelegramUploader {
             writer.append("--").append(boundary).append("--\r\n").flush();
         }
 
-        if (conn.getResponseCode() != 200) {
-            throw new IOException("API Error " + conn.getResponseCode() + ": " + readError(conn));
+        int code = conn.getResponseCode();
+        if (code != 200) {
+            String err = readError(conn);
+            if (code == 429) {
+                long retryAfter = parseRetryAfter(err);
+                throw new TelegramRateLimitException(retryAfter, "Telegram Rate Limit: " + err);
+            }
+            throw new IOException("API Error " + code + ": " + err);
         }
         logger.info("✅ Photo Upload Successful!");
     }
@@ -297,5 +317,19 @@ public class TelegramUploader {
         } catch (Exception e) {
             return "Failed to read error: " + e.getMessage();
         }
+    }
+
+    private long parseRetryAfter(String errorBody) {
+        try {
+            // Simple regex to find "retry_after":\s*(\d+)
+            java.util.regex.Pattern p = java.util.regex.Pattern.compile("\"retry_after\":\\s*(\\d+)");
+            java.util.regex.Matcher m = p.matcher(errorBody);
+            if (m.find()) {
+                return Long.parseLong(m.group(1));
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to parse retry_after from error: {}", errorBody);
+        }
+        return 30; // Default fallback 30s
     }
 }

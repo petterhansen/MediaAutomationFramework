@@ -65,11 +65,16 @@ public class PartySource implements MediaSource {
         int targetPostCount = task.getInt("amount", 1);
         String source = task.getString("source");
 
+        // Check if this is explicitly a "random" search
+        boolean isRandom = query.equalsIgnoreCase("random");
+
         // MediaChat-style auto-source detection: try Coomer first, then Kemono
         boolean isKemono = "kemono".equalsIgnoreCase(source);
 
-        if (source.equalsIgnoreCase("auto") || source.equalsIgnoreCase("coomer") || source.equalsIgnoreCase("party")) {
-            // Try Coomer first
+        if (!isRandom && !query.equalsIgnoreCase("all") && !query.equalsIgnoreCase("popular") &&
+                (source.equalsIgnoreCase("auto") || source.equalsIgnoreCase("coomer")
+                        || source.equalsIgnoreCase("party"))) {
+            // Try Coomer first (Creator Search)
             List<Creator> coomerCreators = getCreatorsCached(COOMER_API, false);
             Creator coomerCreator = searchCreatorSmart(coomerCreators, query, null);
 
@@ -95,21 +100,106 @@ public class PartySource implements MediaSource {
 
         logger.info("🚀 Starting PartySource: " + query + " (Target: " + targetPostCount + ")");
 
-        if (query.equalsIgnoreCase("all")) {
+        if (isRandom) {
+            handleRandomSearch(task, apiUrl, targetPostCount, isKemono);
+        } else if (query.equalsIgnoreCase("popular") || query.equalsIgnoreCase("all")) {
             handlePopularSearch(task, apiUrl, targetPostCount, isKemono);
         } else {
+            // Exact match or fallback
             handleCreatorSearch(task, apiUrl, query, targetPostCount, isKemono);
         }
 
         logger.info("✅ PartySource finished: " + query);
     }
 
-    private void handlePopularSearch(QueueTask task, String baseUrl, int targetPostCount, boolean isKemono) {
+    private void handleRandomSearch(QueueTask task, String baseUrl, int targetPostCount, boolean isKemono) {
         try {
-            String json = fetch(baseUrl + "/posts/popular", isKemono);
+            // Use random offset to simulate "Random" posts
+            // Posts are usually in the millions, but let's stick to a safe range
+            int maxOffset = 5000;
+            int rawOffset = new Random().nextInt(maxOffset);
+            // ENFORCE STEPPING OF 50 (Crucial for API)
+            int offset = (rawOffset / 50) * 50;
+
+            logger.info("🎲 Fetching random posts from offset: " + offset);
+
+            String json = fetch(baseUrl + "/posts?o=" + offset, isKemono);
             if (json == null)
                 return;
             List<Post> posts = parsePostList(json);
+
+            int queued = 0;
+            // Shuffle posts to be truly random within the page
+            Collections.shuffle(posts);
+
+            for (Post post : posts) {
+                if (queued >= targetPostCount)
+                    break;
+                Creator tempCreator = new Creator(post.user(), post.user(), post.service());
+                boolean has = false;
+
+                if (post.file() != null && processFile(post.file(), post, tempCreator, task, isKemono))
+                    has = true;
+
+                if (post.attachments() != null) {
+                    for (FileInfo att : post.attachments()) {
+                        if (processFile(att, post, tempCreator, task, isKemono))
+                            has = true;
+                    }
+                }
+                if (has)
+                    queued++;
+                task.setTotalItems(Math.max(queued, targetPostCount));
+            }
+        } catch (Exception e) {
+            logger.error("RandomSearch Error", e);
+        }
+    }
+
+    private void handlePopularSearch(QueueTask task, String baseUrl, int targetPostCount, boolean isKemono) {
+        try {
+            // API requires 'date' and 'period'
+            // Format: YYYY-MM-DD
+            String date = java.time.LocalDate.now().toString();
+            String period = "week"; // Default to weekly popularity
+
+            String url = String.format("%s/posts/popular?period=%s&date=%s", baseUrl, period, date);
+
+            logger.info("🔥 Fetching Popular Posts: " + url);
+            String json = fetch(url, isKemono);
+
+            if (json == null) {
+                logger.warn("❌ Popular fetch returned NULL");
+                return;
+            }
+
+            // Debug: Check what we got
+            logger.info("📄 Popular JSON Response length: " + json.length());
+            if (json.length() < 500)
+                logger.info("📄 Content: " + json);
+
+            // Popular API returns { posts: [...] } (Actual response)
+            // Docs said { results: [...] } but reality matches "posts"
+            List<Post> posts = new ArrayList<>();
+            try {
+                JsonObject root = JsonParser.parseString(json).getAsJsonObject();
+                if (root.has("posts")) {
+                    JsonArray results = root.getAsJsonArray("posts");
+                    logger.info("🔢 Found " + results.size() + " popular posts in JSON");
+                    posts = gson.fromJson(results, new TypeToken<List<Post>>() {
+                    }.getType());
+                } else if (root.has("results")) {
+                    // Fallback to 'results' just in case
+                    JsonArray results = root.getAsJsonArray("results");
+                    logger.info("🔢 Found " + results.size() + " popular posts in JSON (variant)");
+                    posts = gson.fromJson(results, new TypeToken<List<Post>>() {
+                    }.getType());
+                } else {
+                    logger.warn("⚠️ JSON does not contain 'posts' or 'results' field! Keys: " + root.keySet());
+                }
+            } catch (Exception e) {
+                logger.error("Error parsing popular posts JSON", e);
+            }
 
             int queued = 0;
             for (Post post : posts) {
@@ -208,6 +298,23 @@ public class PartySource implements MediaSource {
     private boolean processFile(FileInfo info, Post post, Creator creator, QueueTask task, boolean isKemono) {
         if (info.path() == null)
             return false;
+
+        // FILTER: Check filetype if specified (vid/img)
+        String filterType = task.getString("filetype");
+        if (filterType != null) {
+            String ext = info.name().toLowerCase();
+            boolean isVideo = ext.endsWith(".mp4") || ext.endsWith(".m4v") || ext.endsWith(".mov")
+                    || ext.endsWith(".mkv") || ext.endsWith(".webm");
+            boolean isImage = ext.endsWith(".jpg") || ext.endsWith(".jpeg") || ext.endsWith(".png")
+                    || ext.endsWith(".gif") || ext.endsWith(".webp");
+
+            if (filterType.equalsIgnoreCase("vid") && !isVideo) {
+                return false;
+            }
+            if (filterType.equalsIgnoreCase("img") && !isImage) {
+                return false;
+            }
+        }
 
         String historyKey = (creator.name() != null ? creator.name() : creator.id());
         if (kernel.getHistoryManager().isProcessed(historyKey, info.name()))

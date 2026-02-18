@@ -28,14 +28,98 @@ public class DownloadCmdPlugin implements MediaPlugin {
     @Override
     public void onEnable(Kernel kernel) {
         this.kernel = kernel;
-        
+
         // Register /dl command
         kernel.registerCommand("/dl", this::handleDownload);
-        
+
+        // Register BROWSER_BATCH executor
+        kernel.getQueueManager().registerExecutor("BROWSER_BATCH", new BrowserExecutor(kernel));
+
         logger.info("✅ DownloadCmd plugin enabled");
         logger.info("   Usage: /dl {amount} {query} [vid|img] [service]");
         logger.info("   Example: /dl 1 alexapearl");
         logger.info("   Example: /dl 5 coomer:alexapearl vid");
+    }
+
+    // Inner class for browser execution
+    private static class BrowserExecutor implements com.framework.core.queue.TaskExecutor {
+        private final Kernel kernel;
+
+        public BrowserExecutor(Kernel kernel) {
+            this.kernel = kernel;
+        }
+
+        @Override
+        public void execute(QueueTask task) {
+            List<String> urls = (List<String>) task.getParameter("urls");
+            String filterType = task.getString("filetype");
+            String folder = task.getString("folder");
+            if (folder == null)
+                folder = "downloads";
+
+            if (urls == null || urls.isEmpty())
+                return;
+
+            task.setTotalItems(urls.size());
+
+            for (String url : urls) {
+                // Filter check
+                if (filterType != null) {
+                    String lowerUrl = url.toLowerCase();
+                    boolean isVideo = lowerUrl.endsWith(".mp4") || lowerUrl.endsWith(".webm")
+                            || lowerUrl.endsWith(".mkv") || lowerUrl.endsWith(".mov");
+                    boolean isImage = lowerUrl.endsWith(".jpg") || lowerUrl.endsWith(".junit")
+                            || lowerUrl.endsWith(".png") || lowerUrl.endsWith(".gif") || lowerUrl.endsWith(".webp"); // .junit
+                                                                                                                     // was
+                                                                                                                     // a
+                                                                                                                     // typo
+                                                                                                                     // in
+                                                                                                                     // thought
+                                                                                                                     // process
+                                                                                                                     // but
+                                                                                                                     // likely
+                                                                                                                     // jpg/jpeg/png
+                                                                                                                     // in
+                                                                                                                     // reality,
+                                                                                                                     // fixing
+                                                                                                                     // here
+
+                    if ("vid".equalsIgnoreCase(filterType) && !isVideo) {
+                        logger.info("Skipping non-video: {}", url);
+                        continue;
+                    }
+                    if ("img".equalsIgnoreCase(filterType) && !isImage) {
+                        logger.info("Skipping non-image: {}", url);
+                        continue;
+                    }
+                }
+
+                String filename = url.substring(url.lastIndexOf("/") + 1);
+                if (filename.contains("?"))
+                    filename = filename.substring(0, filename.indexOf("?"));
+
+                com.framework.core.pipeline.PipelineItem item = new com.framework.core.pipeline.PipelineItem(url,
+                        filename, task);
+                item.getMetadata().put("creator", folder);
+                item.getMetadata().put("source", "browser");
+
+                // Pass auth data (Cookies/Referer) in "headers" map as expected by
+                // CoreMediaPlugin
+                java.util.Map<String, String> headers = new java.util.HashMap<>();
+
+                if (task.getParameter("cookies") != null)
+                    headers.put("Cookie", (String) task.getParameter("cookies"));
+                if (task.getParameter("referer") != null)
+                    headers.put("Referer", (String) task.getParameter("referer"));
+                if (task.getParameter("userAgent") != null)
+                    headers.put("User-Agent", (String) task.getParameter("userAgent"));
+
+                if (!headers.isEmpty())
+                    item.getMetadata().put("headers", headers);
+
+                kernel.getPipelineManager().submit(item);
+            }
+        }
     }
 
     @Override
@@ -50,37 +134,35 @@ public class DownloadCmdPlugin implements MediaPlugin {
         try {
             // Parse command arguments
             DownloadRequest request = CommandParser.parse(args);
-            
+
             logger.info("📥 Download request: {}", request);
-            
+
             // Auto-detect source if not specified
             if (request.source() == null) {
                 String detectedSource = SourceDetector.detect(request.query());
                 logger.info("🔍 Auto-detected source: {}", detectedSource);
-                
+
                 // Create new request with detected source
                 request = new DownloadRequest(
-                    request.amount(),
-                    detectedSource,
-                    request.query(),
-                    request.filetype(),
-                    request.service()
-                );
+                        request.amount(),
+                        detectedSource,
+                        request.query(),
+                        request.filetype(),
+                        request.service());
             } else {
                 // Normalize source aliases
                 String normalizedSource = normalizeSource(request.source());
                 request = new DownloadRequest(
-                    request.amount(),
-                    normalizedSource,
-                    request.query(),
-                    request.filetype(),
-                    request.service()
-                );
+                        request.amount(),
+                        normalizedSource,
+                        request.query(),
+                        request.filetype(),
+                        request.service());
             }
-            
+
             // Execute request
             executeRequest(chatId, threadId, request);
-            
+
         } catch (IllegalArgumentException e) {
             logger.warn("Invalid /dl command: {}", e.getMessage());
             sendMessage(chatId, threadId, "❌ " + e.getMessage());
@@ -96,7 +178,7 @@ public class DownloadCmdPlugin implements MediaPlugin {
     private void executeRequest(long chatId, Integer threadId, DownloadRequest request) {
         QueueTask task = createTask(request, chatId, threadId);
         kernel.getQueueManager().addTask(task);
-        
+
         sendMessage(chatId, threadId, String.format("✅ Queued: %s", request));
     }
 
@@ -105,7 +187,7 @@ public class DownloadCmdPlugin implements MediaPlugin {
      */
     private QueueTask createTask(DownloadRequest req, long chatId, Integer threadId) {
         String taskType;
-        
+
         // Determine task type based on source
         switch (req.source()) {
             case "coomer":
@@ -121,12 +203,15 @@ public class DownloadCmdPlugin implements MediaPlugin {
             case "browser":
                 taskType = "BROWSER_BATCH";
                 break;
+            case "socials":
+                taskType = "socials_dl";
+                break;
             default:
                 throw new IllegalArgumentException("Unknown source: " + req.source());
         }
-        
+
         QueueTask task = new QueueTask(taskType);
-        
+
         // Store initiator info for dynamic routing (ALL sources)
         if (chatId != 0) {
             task.addParameter("initiatorChatId", String.valueOf(chatId));
@@ -134,7 +219,7 @@ public class DownloadCmdPlugin implements MediaPlugin {
                 task.addParameter("initiatorThreadId", String.valueOf(threadId));
             }
         }
-        
+
         switch (req.source()) {
             case "coomer":
             case "kemono":
@@ -142,39 +227,52 @@ public class DownloadCmdPlugin implements MediaPlugin {
                 task.addParameter("query", req.query());
                 task.addParameter("amount", req.amount());
                 task.addParameter("source", req.source());
-                
+
                 // Add filters
-                if (req.filetype() != null) {
+                if (req.filetype() != null)
                     task.addParameter("filetype", req.filetype());
-                }
-                if (req.service() != null) {
+                if (req.service() != null)
                     task.addParameter("service", req.service());
-                }
                 break;
 
             case "youtube":
                 // YouTube plugin format
                 task.addParameter("type", "video");
                 task.addParameter("query", req.query());
-                task.addParameter("amount", req.amount());
+                task.addParameter("amount", req.amount()); // Currently unused for single video but kept for
+                                                           // channel/playlist
+                if (req.filetype() != null)
+                    task.addParameter("filetype", req.filetype());
                 break;
 
             case "booru":
                 // Booru plugin format
                 task.addParameter("tags", req.query());
                 task.addParameter("amount", req.amount());
+                if (req.filetype() != null)
+                    task.addParameter("filetype", req.filetype());
                 break;
 
             case "browser":
                 // Browser source format
                 task.addParameter("urls", List.of(req.query()));
                 task.addParameter("folder", "downloads");
+                if (req.filetype() != null)
+                    task.addParameter("filetype", req.filetype());
+                break;
+
+            case "socials":
+                // Socials plugin format
+                task.addParameter("query", req.query());
+                task.addParameter("amount", req.amount());
+                if (req.filetype() != null)
+                    task.addParameter("filetype", req.filetype());
                 break;
 
             default:
                 throw new IllegalArgumentException("Unknown source: " + req.source());
         }
-        
+
         return task;
     }
 

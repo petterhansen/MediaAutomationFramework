@@ -29,6 +29,12 @@ public class TelegramListenerService extends Thread {
     // Lokale Registry (nur für Plugin-interne Befehle)
     private final Map<String, CommandHandler> localRegistry = new ConcurrentHashMap<>();
 
+    private TelegramPipelineMonitor monitor;
+
+    public void setMonitor(TelegramPipelineMonitor monitor) {
+        this.monitor = monitor;
+    }
+
     // Referenz auf die Kernel-Registry (für Core-Befehle wie /help, /status)
     private Map<String, CommandHandler> kernelRegistryReference;
 
@@ -155,7 +161,15 @@ public class TelegramListenerService extends Thread {
                 }
 
                 // IMMER löschen (außer in Channels), um den Chat sauber zu halten
-                deleteMessage(chatId, messageId);
+                // NUR wenn in Config aktiviert ODER es ist ein Befehl (fängt mit / an)
+                String delSetting = kernel.getConfigManager().getConfig().getPluginSetting("TelegramIntegration",
+                        "deleteUserMessages", "false");
+                boolean isCommand = text.trim().startsWith("/");
+
+                if (isCommand || Boolean.parseBoolean(delSetting)) {
+                    // Delay deletion by 5 seconds to give user time to see it's processed
+                    scheduler.schedule(() -> deleteMessage(chatId, messageId), 5, TimeUnit.SECONDS);
+                }
             } else {
                 // In Channels: Nur Commands (kein Wizard, kein Löschen von Posts)
                 if (!text.isEmpty()) {
@@ -211,6 +225,24 @@ public class TelegramListenerService extends Thread {
             // Falls /status nicht im Kernel registriert ist, hier ein Fallback
             sendText(chatId, threadId,
                     "🟢 <b>System Online</b>\nQueue Size: " + kernel.getQueueManager().getQueueSize());
+            return;
+        }
+
+        if (cmd.equals("/monitor")) {
+            if (monitor != null) {
+                monitor.start(chatId);
+            } else {
+                sendText(chatId, threadId, "⚠️ Monitor module not loaded.");
+            }
+            return;
+        }
+
+        if (cmd.equals("/stopmonitor")) {
+            if (monitor != null) {
+                monitor.stop();
+                sendText(chatId, threadId, "🛑 Monitor stopped.");
+            }
+            return;
         }
     }
 

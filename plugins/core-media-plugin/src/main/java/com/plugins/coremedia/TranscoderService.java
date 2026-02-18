@@ -8,8 +8,12 @@ import org.slf4j.LoggerFactory;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-public class TranscoderService {
+import com.framework.core.media.MediaTranscoder;
+
+public class TranscoderService implements MediaTranscoder {
     private static final Logger logger = LoggerFactory.getLogger(TranscoderService.class);
 
     private final Configuration config;
@@ -82,7 +86,8 @@ public class TranscoderService {
         if (fontPath != null) {
             cmd.add("-vf");
             // MediaChat-style watermark for images: shadow instead of box, bottom-right
-            // Use same size as video (h/35) or slightly smaller (h/40) to avoid being huge on high-res portrait images
+            // Use same size as video (h/35) or slightly smaller (h/40) to avoid being huge
+            // on high-res portrait images
             cmd.add(String.format(Locale.US,
                     "drawtext=text='%s':fontfile='%s':fontcolor=white@0.7:fontsize=h/40:x=w-tw-(h/50):y=h-th-(h/50):shadowcolor=black@0.6:shadowx=4:shadowy=4",
                     getWatermarkText(), fontPath));
@@ -113,7 +118,7 @@ public class TranscoderService {
                             input.getName());
                     // Wir tun so, als wäre alles ok, nutzen aber Defaults (keine Vorschau, kein
                     // Split)
-                    probe = new VideoProbeResult(1920, 1080, 0);
+                    probe = new VideoProbeResult(1920, 1080, 0, "1:1", 0);
                 } else {
                     // Wirklich kaputt (z.B. HTML Error Page)
                     String contentSnippet = readHeaderSnippet(input);
@@ -136,6 +141,7 @@ public class TranscoderService {
             long size = input.length();
             long splitThreshold = getSplitThreshold();
             boolean needsSplit = size > splitThreshold;
+            boolean needsFix = probe.needsFix(); // Check for Rotation or Anamorphic
             File preview = null;
 
             // Preview nur erstellen, wenn wir die Dauer kennen und > 60s
@@ -145,7 +151,12 @@ public class TranscoderService {
 
             List<File> resultFiles = new ArrayList<>();
 
-            if (needsSplit || forceReencode || useWatermark) {
+            if (needsSplit || forceReencode || useWatermark || needsFix) {
+                if (needsFix) {
+                    logger.info("🔧 Auto-Fix applied for {}: Rotation={} or PixelRatio={}", input.getName(),
+                            probe.rotation, probe.sar);
+                }
+
                 List<File> processedParts = transcodeAndSplit(input, useWatermark, needsSplit);
                 if (!processedParts.isEmpty()) {
                     input.delete();
@@ -320,7 +331,7 @@ public class TranscoderService {
 
     private void createPreviewThumbnail(File video, String ffmpeg) {
         try {
-            File thumb = new File(video.getAbsolutePath() + ".thumb.jpg");
+            File thumb = resolveThumbnailPath(video);
             List<String> cmd = Arrays.asList(
                     ffmpeg, "-y", "-i", video.getAbsolutePath(),
                     "-vf", "fps=1/3,tile=3x3,scale=320:-1",
@@ -342,6 +353,11 @@ public class TranscoderService {
         cmd.add("-i");
         cmd.add(input.getAbsolutePath());
 
+        // FIX 3: Revert to EXACT predecessor filter chain.
+        // The user confirmed preview (which uses setsar=1) works, and main video
+        // (without setsar=1) doesn't.
+        // Predecessor used:
+        // scale='min(1920,iw)':-2,pad=ceil(iw/2)*2:ceil(ih/2)*2,setsar=1
         String filter = "scale='min(1920,iw)':-2,pad=ceil(iw/2)*2:ceil(ih/2)*2,setsar=1,format=yuv420p";
         if (useWm) {
             String wmFilter = getDrawTextFilter();
@@ -393,10 +409,31 @@ public class TranscoderService {
         return parts;
     }
 
+    private File resolveThumbnailPath(File video) {
+        try {
+            File cacheDir = new File("media_cache").getCanonicalFile();
+            File absVideo = video.getCanonicalFile();
+            if (absVideo.getPath().startsWith(cacheDir.getPath())) {
+                String rel = absVideo.getPath().substring(cacheDir.getPath().length());
+                if (rel.startsWith(File.separator))
+                    rel = rel.substring(1);
+                File target = new File(new File(cacheDir, ".thumbs"), rel + ".thumb.jpg");
+                File parent = target.getParentFile();
+                if (parent != null && !parent.exists()) {
+                    parent.mkdirs();
+                }
+                return target;
+            }
+        } catch (IOException e) {
+            logger.warn("Thumb path resolve error: " + e.getMessage());
+        }
+        return new File(video.getAbsolutePath() + ".thumb.jpg");
+    }
+
     public File getOrCreateThumbnail(File video) {
         if (video == null || !video.exists())
             return null;
-        File thumb = new File(video.getAbsolutePath() + ".thumb.jpg");
+        File thumb = resolveThumbnailPath(video);
         if (thumb.exists() && thumb.length() > 0)
             return thumb;
 
@@ -416,65 +453,103 @@ public class TranscoderService {
     // --- HELPER & EXECUTOR ---
 
     private VideoProbeResult probeVideo(File input) {
-        // Zuerst prüfen, ob ffprobe überhaupt existiert
-        String ffprobe = OsUtils.getFfmpegCommand().replace("ffmpeg", "ffprobe");
-        if (OsUtils.isWindows() && !ffprobe.endsWith(".exe"))
-            ffprobe += ".exe";
-
-        // Simpler Check ob Command ausführbar wäre (nur falls File Check möglich)
-        // Hier vertrauen wir drauf und fangen Exceptions ab.
-
         try {
-            ProcessBuilder pb = new ProcessBuilder(
-                    ffprobe,
-                    "-v", "error",
-                    "-select_streams", "v:0",
-                    "-show_entries", "stream=width,height,duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1",
-                    input.getAbsolutePath());
-            // ErrorStream redirecten, damit er nicht blockiert
+            // Use "ffmpeg -i" instead of ffprobe to exactly match predecessor's robust
+            // parsing
+            ProcessBuilder pb = new ProcessBuilder(OsUtils.getFfmpegCommand(), "-i", input.getAbsolutePath());
             pb.redirectErrorStream(true);
-
             Process p = pb.start();
 
-            int w = 0, h = 0;
-            double d = 0;
+            int width = 0;
+            int height = 0;
+            double duration = 0;
+            String sar = "1:1";
+            int rotation = 0;
 
-            try (BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+            // Regex from predecessor (MetaDataAnalyzer.java)
+            Pattern resPattern = Pattern.compile("Video:.*,\\s(\\d{2,5})x(\\d{2,5})");
+            Pattern aspectPattern = Pattern.compile("SAR\\s(\\d+:\\d+)\\sDAR\\s(\\d+:\\d+)");
+            Pattern durPattern = Pattern.compile("Duration: (\\d{2}):(\\d{2}):(\\d{2})\\.(\\d{2})");
+
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
                 String line;
-                while ((line = br.readLine()) != null) {
-                    line = line.trim();
-                    if (line.isEmpty())
-                        continue;
+                while ((line = reader.readLine()) != null) {
+                    // Match Resolution
+                    Matcher mRes = resPattern.matcher(line);
+                    if (mRes.find()) {
+                        width = Integer.parseInt(mRes.group(1));
+                        height = Integer.parseInt(mRes.group(2));
+                    }
 
-                    // Versuche simple Zahl zu parsen
-                    try {
-                        if (line.contains(".")) {
-                            double val = Double.parseDouble(line);
-                            if (d == 0)
-                                d = val; // Duration ist meist Double
-                        } else {
-                            int val = Integer.parseInt(line);
-                            if (w == 0)
-                                w = val;
-                            else if (h == 0)
-                                h = val;
+                    // Match SAR
+                    Matcher mAr = aspectPattern.matcher(line);
+                    if (mAr.find()) {
+                        sar = mAr.group(1);
+                    }
+
+                    // Match Duration
+                    Matcher mDur = durPattern.matcher(line);
+                    if (mDur.find()) {
+                        duration = (Integer.parseInt(mDur.group(1)) * 3600L) +
+                                (Integer.parseInt(mDur.group(2)) * 60L) +
+                                Integer.parseInt(mDur.group(3));
+                        // Add milliseconds fraction
+                        duration += Double.parseDouble("0." + mDur.group(4));
+                    }
+
+                    // Match Rotation (Predecessor logic)
+                    if (line.trim().startsWith("rotate") && !line.contains(": 0")) {
+                        try {
+                            String val = line.substring(line.indexOf(":") + 1).trim();
+                            rotation = Integer.parseInt(val);
+                        } catch (Exception e) {
+                            rotation = 90; // Fallback if parsing fails but rotation exists
                         }
-                    } catch (NumberFormatException ignored) {
+                    }
+                    // Also check for "rotation" (modern ffmpeg syntax in displaymatrix)
+                    if (line.trim().contains("rotation of") && line.contains("degrees")) {
+                        // e.g. "displaymatrix: rotation of -90.00 degrees"
+                        rotation = 90; // Treat as requiring fix
                     }
                 }
             }
-            // Wenn wir Breite und Höhe haben, ist es ein Erfolg
-            if (w > 0 && h > 0)
-                return new VideoProbeResult(w, h, d);
+            p.waitFor();
+
+            if (width > 0 && height > 0)
+                return new VideoProbeResult(width, height, duration, sar, rotation);
 
         } catch (Exception e) {
             logger.debug("Probe failed: {}", e.getMessage());
         }
-        return null;
+        return null; // Probe failed
     }
 
-    private record VideoProbeResult(int width, int height, double duration) {
+    public Map<String, Object> getVideoMetadata(File input) {
+        VideoProbeResult probe = probeVideo(input);
+        if (probe != null) {
+            Map<String, Object> meta = new HashMap<>();
+            meta.put("width", probe.width);
+            meta.put("height", probe.height);
+            meta.put("duration", (int) probe.duration);
+            meta.put("rotation", probe.rotation);
+            return meta;
+        }
+        return Collections.emptyMap();
+    }
+
+    private record VideoProbeResult(int width, int height, double duration, String sar, int rotation) {
+        public boolean needsFix() {
+            // 1. Odd dimensions
+            if (width % 2 != 0 || height % 2 != 0)
+                return true;
+            // 2. Anamorphic pixels
+            if (sar != null && !sar.equals("1:1") && !sar.equals("0:1") && !sar.equals("0:0"))
+                return true;
+            // 3. Rotation
+            if (rotation != 0)
+                return true;
+            return false;
+        }
     }
 
     private boolean executeFFmpeg(List<String> cmd, String taskName) {

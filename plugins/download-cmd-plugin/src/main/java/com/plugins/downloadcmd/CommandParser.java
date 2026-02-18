@@ -4,7 +4,7 @@ package com.plugins.downloadcmd;
  * Parses /dl command arguments into DownloadRequest
  */
 public class CommandParser {
-    
+
     /**
      * Parse /dl command arguments
      * Format: /dl {amount} [source:]{query} [vid|img] [service]
@@ -16,15 +16,14 @@ public class CommandParser {
     public static DownloadRequest parse(String[] args) throws IllegalArgumentException {
         if (args.length < 2) {
             throw new IllegalArgumentException(
-                "Usage: /dl {amount} {query} [vid|img] [service]\n" +
-                "Examples:\n" +
-                "  /dl 1 alexapearl\n" +
-                "  /dl 5 coomer:alexapearl\n" +
-                "  /dl 10 alexapearl vid\n" +
-                "  /dl 50 alexapearl img onlyfans"
-            );
+                    "Usage: /dl {amount} {query} [vid|img] [service]\n" +
+                            "Examples:\n" +
+                            "  /dl 1 alexapearl\n" +
+                            "  /dl 5 coomer:alexapearl\n" +
+                            "  /dl 10 alexapearl vid\n" +
+                            "  /dl 50 alexapearl img onlyfans");
         }
-        
+
         // Parse amount
         int amount;
         try {
@@ -35,29 +34,28 @@ public class CommandParser {
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException("Invalid amount: " + args[0]);
         }
-        
+
         // Parse source:query or just query
         String rawQuery = args[1];
         String source = null;
         String query;
-        
-        if (rawQuery.contains(":")) {
+
+        if (rawQuery.contains(":") && !rawQuery.startsWith("http:") && !rawQuery.startsWith("https:")) {
             String[] parts = rawQuery.split(":", 2);
             source = parts[0].toLowerCase();
             query = parts[1];
-            
+
             // Validate source
             if (!isValidSource(source)) {
                 throw new IllegalArgumentException(
-                    "Invalid source: " + source + ". " +
-                    "Valid: coomer, kemono, youtube, booru, browser"
-                );
+                        "Invalid source: " + source + ". " +
+                                "Valid: coomer, kemono, youtube, booru, browser, socials");
             }
         } else {
             query = rawQuery;
             // source remains null = auto-detect
         }
-        
+
         // Parse optional filetype
         String filetype = null;
         if (args.length > 2) {
@@ -67,12 +65,11 @@ public class CommandParser {
             } else if (!isValidService(arg2)) {
                 // If it's not a filetype and not a service, it's invalid
                 throw new IllegalArgumentException(
-                    "Invalid argument: " + args[2] + ". " +
-                    "Expected: vid, img, or service name"
-                );
+                        "Invalid argument: " + args[2] + ". " +
+                                "Expected: vid, img, or service name");
             }
         }
-        
+
         // Parse optional service
         String service = null;
         int serviceIndex = filetype != null ? 3 : 2;
@@ -84,23 +81,24 @@ public class CommandParser {
                 throw new IllegalArgumentException("Invalid service: " + argService);
             }
         }
-        
+
         return new DownloadRequest(amount, source, query, filetype, service);
     }
-    
+
     private static boolean isValidSource(String source) {
         return source.equals("coomer") ||
-               source.equals("kemono") ||
-               source.equals("youtube") ||
-               source.equals("yt") || // Shorthand
-               source.equals("booru") ||
-               source.equals("r34") || // Alias
-               source.equals("browser");
+                source.equals("kemono") ||
+                source.equals("youtube") ||
+                source.equals("yt") || // Shorthand
+                source.equals("booru") ||
+                source.equals("r34") || // Alias
+                source.equals("browser") ||
+                source.equals("socials");
     }
-    
+
     private static boolean isValidService(String service) {
         return service.equals("onlyfans") ||
-               service.equals("patreon") ||
-               service.equals("fansly");
+                service.equals("patreon") ||
+                service.equals("fansly");
     }
 }

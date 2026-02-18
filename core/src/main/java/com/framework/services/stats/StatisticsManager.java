@@ -26,82 +26,88 @@ public class StatisticsManager {
     private final File historyDir;
     private final Gson gson;
     private StatsData persistentData;
+    private final Kernel kernel;
 
-    // In-Memory Cache
-    private final Map<String, CreatorStats> cachedCreatorStats = new ConcurrentHashMap<>();
+    // In-Memory Cache moved to DB-backed
+    // private final Map<String, CreatorStats> cachedCreatorStats = new
+    // ConcurrentHashMap<>();
 
-    public record CreatorStats(int total, int images, int videos, int gifs, long lastActivity) {}
+    public record CreatorStats(int total, int images, int videos, int gifs, long lastActivity) {
+    }
 
     private static class StatsData {
         long totalBytesDownloaded = 0;
-        long totalBytesUploaded = 0;
+        long totalBytesUploaded = 0; // Legacy / Untracked
         long totalFfmpegTimeSeconds = 0;
         long totalRequestsProcessed = 0;
-        Map<String, CreatorStats> creatorStats = new ConcurrentHashMap<>();
+        // Map<String, CreatorStats> creatorStats = new ConcurrentHashMap<>(); // Legacy
     }
 
     public StatisticsManager(Kernel kernel) {
+        this.kernel = kernel;
         this.statsFile = new File(kernel.getToolsDir(), "stats.json");
         this.historyDir = new File(kernel.getToolsDir(), "history_tracking");
-        if (!historyDir.exists()) historyDir.mkdirs();
+        if (!historyDir.exists())
+            historyDir.mkdirs();
 
         this.gson = new GsonBuilder().setPrettyPrinting().create();
         loadPersistentData();
     }
 
-    public synchronized void addDownload(long bytes) { persistentData.totalBytesDownloaded += bytes; save(); }
-    public synchronized void addUpload(long bytes) { persistentData.totalBytesUploaded += bytes; save(); }
-    public synchronized void addFfmpegTime(long seconds) { persistentData.totalFfmpegTimeSeconds += seconds; save(); }
-    public synchronized void addRequest() { persistentData.totalRequestsProcessed++; save(); }
-
-    public void updateCreatorStats(String creator, String filename) {
-        if (creator == null || filename == null) return;
-        String key = creator.trim().toLowerCase();
-
-        // Typ-Erkennung aus src/StatisticsManager.java
-        String type = "img";
-        String l = filename.toLowerCase();
-        if (l.endsWith(".gif")) type = "gif";
-        else if (l.matches(".*\\.(mp4|m4v|mov|webm|mkv|avi)$")) type = "vid";
-
-        String finalType = type;
-
-        cachedCreatorStats.compute(key, (k, v) -> {
-            int img = v == null ? 0 : v.images();
-            int vid = v == null ? 0 : v.videos();
-            int gif = v == null ? 0 : v.gifs();
-            int tot = v == null ? 0 : v.total();
-
-            if (finalType.equals("gif")) gif++;
-            else if (finalType.equals("vid")) vid++;
-            else img++;
-            tot++;
-
-            return new CreatorStats(tot, img, vid, gif, System.currentTimeMillis());
-        });
-
-        synchronized (this) {
-            persistentData.creatorStats.put(key, cachedCreatorStats.get(key));
-            save();
-        }
+    public synchronized void addDownload(long bytes) {
+        persistentData.totalBytesDownloaded += bytes;
+        save();
     }
 
-    // --- API Access Methods (NEU) ---
+    public synchronized void addUpload(long bytes) {
+        persistentData.totalBytesUploaded += bytes;
+        save();
+    }
+
+    public synchronized void addFfmpegTime(long seconds) {
+        persistentData.totalFfmpegTimeSeconds += seconds;
+        save();
+    }
+
+    public synchronized void addRequest() {
+        persistentData.totalRequestsProcessed++;
+        save();
+    }
+
+    // Legacy method - no-op now as DB tracks this via Pipeline
+    public void updateCreatorStats(String creator, String filename) {
+        // No-op: DatabaseService tracks this via markProcessed
+    }
+
+    // --- API Access Methods (DB-backed) ---
 
     public Map<String, CreatorStats> getAllCreatorsDetailed() {
-        return cachedCreatorStats.entrySet().stream()
-                .sorted((e1, e2) -> Integer.compare(e2.getValue().total(), e1.getValue().total()))
-                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (e1, e2) -> e1, LinkedHashMap::new));
+        return convertStats(kernel.getDatabaseService().getCreatorStatistics());
     }
 
     public Map<String, CreatorStats> getTopCreatorsDetailed(int limit) {
-        return cachedCreatorStats.entrySet().stream()
+        return getAllCreatorsDetailed().entrySet().stream()
                 .sorted((e1, e2) -> Integer.compare(e2.getValue().total(), e1.getValue().total()))
                 .limit(limit)
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (e1, e2) -> e1, LinkedHashMap::new));
     }
 
-    // --- Persistence ---
+    private Map<String, CreatorStats> convertStats(
+            Map<String, com.framework.services.database.DatabaseService.CreatorStatsDTO> dbStats) {
+        Map<String, CreatorStats> result = new LinkedHashMap<>();
+        for (Map.Entry<String, com.framework.services.database.DatabaseService.CreatorStatsDTO> entry : dbStats
+                .entrySet()) {
+            com.framework.services.database.DatabaseService.CreatorStatsDTO dto = entry.getValue();
+            // Note: lastActivity is not tracked in aggregated DTO yet, defaulting to 0 or
+            // now?
+            // We could add MAX(downloaded_at) to query if needed. For now 0.
+            result.put(entry.getKey(),
+                    new CreatorStats((int) dto.total, (int) dto.images, (int) dto.videos, 0, dto.lastActive));
+        }
+        return result;
+    }
+
+    // --- Persistence (Legacy / Requests only) ---
 
     private void loadPersistentData() {
         if (statsFile.exists()) {
@@ -114,64 +120,43 @@ public class StatisticsManager {
         } else {
             persistentData = new StatsData();
         }
-
-        if (persistentData.creatorStats == null) {
-            persistentData.creatorStats = new ConcurrentHashMap<>();
-        }
-
-        // Auto-Repair & Migration
-        if (persistentData.creatorStats.isEmpty()) {
-            importFromHistoryFiles();
-        }
-
-        cachedCreatorStats.putAll(persistentData.creatorStats);
-    }
-
-    private void importFromHistoryFiles() {
-        File[] files = historyDir.listFiles((dir, name) -> name.endsWith(".txt"));
-        if (files == null) return;
-        logger.info("Migrating stats from {} history files...", files.length);
-
-        for (File f : files) {
-            String creator = f.getName().replace(".txt", "").toLowerCase();
-            int img = 0, vid = 0, gif = 0, tot = 0;
-            long lastMod = f.lastModified();
-
-            try (BufferedReader reader = Files.newBufferedReader(f.toPath(), StandardCharsets.UTF_8)) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    String l = line.trim().toLowerCase();
-                    if (l.isEmpty()) continue;
-                    tot++;
-                    if (l.endsWith(".gif")) gif++;
-                    else if (l.matches(".*\\.(mp4|m4v|mov|webm|mkv|avi)$")) vid++;
-                    else img++;
-                }
-            } catch (IOException e) {
-                logger.warn("Error reading history file: {}", f.getName());
-            }
-
-            if (tot > 0) {
-                CreatorStats s = new CreatorStats(tot, img, vid, gif, lastMod);
-                persistentData.creatorStats.put(creator, s);
-            }
-        }
-        save();
     }
 
     private void save() {
         try (Writer w = new FileWriter(statsFile, StandardCharsets.UTF_8)) {
             gson.toJson(persistentData, w);
-        } catch (IOException e) { logger.error("Save stats failed", e); }
+        } catch (IOException e) {
+            logger.error("Save stats failed", e);
+        }
     }
 
-    public long getTotalBytesDownloaded() { return persistentData.totalBytesDownloaded; }
-    public long getTotalBytesUploaded() { return persistentData.totalBytesUploaded; }
-    public long getTotalFfmpegTime() { return persistentData.totalFfmpegTimeSeconds; }
-    public long getTotalRequests() { return persistentData.totalRequestsProcessed; }
+    // --- Delegate to DB or internal counter ---
 
-    // Berechnung der Gesamtdateien basierend auf den Creatorn
+    public long getTotalBytesDownloaded() {
+        // return persistentData.totalBytesDownloaded; // Legacy
+        return kernel.getDatabaseService().getTotalBytes();
+    }
+
+    public long getTotalBytesUploaded() {
+        return persistentData.totalBytesUploaded; // Currently not tracked in DB per file, so keep legacy or remove?
+        // Actually DB has 'uploaded_at', but we don't track upload bytes separately
+        // usually same as file size.
+        // For now, let's return DB total bytes for consistency or 0 if we don't track
+        // it.
+        // Let's stick to total bytes from DB as "Managed Bytes".
+        // return kernel.getDatabaseService().getTotalBytes();
+    }
+
+    public long getTotalFfmpegTime() {
+        // return persistentData.totalFfmpegTimeSeconds; // Legacy
+        return (long) kernel.getDatabaseService().getTotalDuration();
+    }
+
+    public long getTotalRequests() {
+        return persistentData.totalRequestsProcessed;
+    }
+
     public int getTotalFiles() {
-        return persistentData.creatorStats.values().stream().mapToInt(CreatorStats::total).sum();
+        return (int) kernel.getDatabaseService().getTotalDownloads();
     }
 }

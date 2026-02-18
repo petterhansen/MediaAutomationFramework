@@ -54,11 +54,32 @@ public class LocalTaskExecutor implements TaskExecutor {
             // Filter valid files
             for (File f : files) {
                 if (f.isFile() && !f.getName().startsWith(".")) {
-                    validFiles.add(f);
+                    String name = f.getName().toLowerCase();
+                    boolean isPart = name.matches(".*part\\d+\\..*");
+                    boolean isProcessed = name.contains("processed");
+                    boolean isPreview = name.contains("preview");
+                    boolean isThumb = name.endsWith(".thumb.jpg");
+
+                    // Filter: Accept media files that are NOT already processed/preview/thumb
+                    // We might want to allow 'parts' if the user wants to merge them, but usually
+                    // we process raw files.
+                    if (!isProcessed && !isPreview && !isThumb) {
+                        if (name.endsWith(".mp4") || name.endsWith(".mkv") || name.endsWith(".mov")
+                                || name.endsWith(".webm") ||
+                                name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png")
+                                || name.endsWith(".gif")) {
+                            validFiles.add(f);
+                        }
+                    } else {
+                        logger.debug("Skipping file (already processed/system file): {}", f.getName());
+                    }
                 }
             }
             Collections.sort(validFiles);
         }
+
+        logger.info("LocalExecutor found {} valid files in '{}' (from {} total)", validFiles.size(), folderName,
+                target.list().length);
 
         int count = 0;
         int total = validFiles.size();

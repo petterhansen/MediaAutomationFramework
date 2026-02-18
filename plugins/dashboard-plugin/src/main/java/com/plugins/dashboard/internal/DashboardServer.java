@@ -1,6 +1,6 @@
 package com.plugins.dashboard.internal;
 
-import com.plugins.coremedia.TranscoderService;
+import com.framework.core.media.MediaTranscoder;
 import com.framework.common.auth.UserManager;
 import com.framework.common.auth.AuthManager;
 import com.framework.core.Kernel;
@@ -14,6 +14,7 @@ import com.google.gson.JsonObject;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpContext;
 import org.apache.commons.fileupload.FileItem;
 import org.apache.commons.fileupload.FileUpload;
 import org.apache.commons.fileupload.disk.DiskFileItemFactory;
@@ -27,68 +28,100 @@ import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
-public class DashboardServer {
+public class DashboardServer implements com.framework.api.WebServer {
     private static final Logger logger = LoggerFactory.getLogger(DashboardServer.class);
     private final Kernel kernel;
     private HttpServer server;
     private final Gson gson = new Gson();
     private static final int PORT = 6875;
 
+    // Map to track registered contexts for unregistering
+    private final Map<String, HttpContext> registeredContexts = new java.util.concurrent.ConcurrentHashMap<>();
+
+    // Brute-force protection: track failed login attempts per IP
+    private final Map<String, long[]> loginAttempts = new java.util.concurrent.ConcurrentHashMap<>();
+    // loginAttempts value: [failCount, lockoutTimestamp (epoch ms)]
+    private static final int MAX_LOGIN_ATTEMPTS = 5;
+    private static final long LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+
     public DashboardServer(Kernel kernel) {
         this.kernel = kernel;
+    }
+
+    public enum Role {
+        ADMIN, GUEST, ANY
     }
 
     public void start() {
         try {
             server = HttpServer.create(new InetSocketAddress(PORT), 0);
 
+            // Register as WebServer service (Interface)
+            kernel.registerService(com.framework.api.WebServer.class, this);
+            kernel.registerService(DashboardServer.class, this); // Legacy
+
             // --- Auth APIs ---
+            logger.info("Registering PUBLIC context: /api/login");
             server.createContext("/api/login", new LoginHandler());
             server.createContext("/api/logout", new LogoutHandler());
+            logger.info("Registering PUBLIC context: /login");
             server.createContext("/login", new HtmlHandler("web/login.html")); // Must NOT be wrapped in AuthWrapper!
+            server.createContext("/", new HtmlHandler("web/auth.html")); // Root points to Auth check
+            server.createContext("/404.html", new HtmlHandler("web/404.html"));
+            server.createContext("/403.html", new HtmlHandler("web/403.html"));
 
             // --- Web Views (HTML) ---
-            // These must be PUBLIC so the browser can load the "App Shell".
-            // The JavaScript on these pages will then use the token to fetch protected
-            // data.
-            server.createContext("/status", new HtmlHandler("web/status.html"));
-            server.createContext("/media", new HtmlHandler("web/media_manager.html"));
-            server.createContext("/members", new HtmlHandler("web/members.html"));
-            server.createContext("/commands", new HtmlHandler("web/commands.html"));
-            server.createContext("/settings", new HtmlHandler("web/settings.html")); // Added missing settings page
+            createAuthorizedContext("/status", new HtmlHandler("web/status.html"), Role.ADMIN);
+            createAuthorizedContext("/media", new HtmlHandler("web/media_manager.html"), Role.ADMIN);
+            createAuthorizedContext("/members", new HtmlHandler("web/members.html"), Role.ADMIN);
+            createAuthorizedContext("/commands", new HtmlHandler("web/commands.html"), Role.ADMIN);
+            createAuthorizedContext("/settings", new HtmlHandler("web/settings.html"), Role.ADMIN);
+            createAuthorizedContext("/statistics", new HtmlHandler("web/statistics.html"), Role.ADMIN);
+            createAuthorizedContext("/database", new HtmlHandler("web/database.html"), Role.ADMIN);
+            createAuthorizedContext("/viewer", new HtmlHandler("web/viewer.html"), Role.ANY);
+
+            // --- Database API ---
+            createAuthorizedContext("/api/database/tables", new DatabaseApiHandler(), Role.ADMIN);
+            createAuthorizedContext("/api/database/query", new DatabaseQueryHandler(), Role.ADMIN);
 
             // --- Static Assets (JS, CSS) ---
             // Must NOT be wrapped in AuthWrapper to allow public access
             server.createContext("/js", new StaticFileHandler("web/js", "/js"));
-            server.createContext("/js", new StaticFileHandler("web/js", "/js"));
             server.createContext("/css", new StaticFileHandler("web/css", "/css"));
+            server.createContext("/wiki", new StaticFileHandler("web/wiki", "/wiki"));
 
             // Share Handler (Public)
             server.createContext("/share", new ShareHandler());
+            server.createContext("/f", new ShareHandler()); // Alias for frontend compatibility
 
             // --- Data APIs ---
             // These remain PROTECTED by AuthWrapper
             createContext("/api/status", new ApiStatusHandler());
-            createContext("/api/guest", new GuestUserHandler());
-            createContext("/api/media", new MediaApiHandler());
+            // Guest login must be public!
+            server.createContext("/api/guest", new GuestUserHandler());
+            createAuthorizedContext("/api/media", new MediaApiHandler(), Role.ANY);
             createContext("/api/history", new HistoryApiHandler());
             createContext("/api/surgeon", new SurgeonHandler());
             createContext("/api/creators", new CreatorsApiHandler());
-            createContext("/api/session", new SessionApiHandler());
+            createAuthorizedContext("/api/session", new SessionApiHandler(), Role.ANY);
             createContext("/api/settings", new SettingsHandler());
             createContext("/api/members", new MembersApiHandler());
             createContext("/api/plugins", new PluginSettingsHandler());
 
             // --- Action APIs ---
-            createContext("/api/command", new CommandApiHandler());
-            createContext("/push", new PushHandler());
-            createContext("/api/torrent", new TorrentPushHandler());
+            createAuthorizedContext("/api/command", new CommandApiHandler(), Role.ADMIN);
+            createAuthorizedContext("/push", new PushHandler(), Role.ADMIN);
+            createAuthorizedContext("/api/torrent", new TorrentPushHandler(), Role.ADMIN);
 
             // --- Streaming & Files ---
-            createContext("/media/file", new MediaFileHandler());
-            createContext("/media/thumb", new ThumbnailHandler());
+            createAuthorizedContext("/media/file", new MediaFileHandler(), Role.ANY);
+            createAuthorizedContext("/media/thumb", new ThumbnailHandler(), Role.ANY);
 
             server.setExecutor(java.util.concurrent.Executors.newFixedThreadPool(10));
             server.start();
@@ -98,8 +131,28 @@ public class DashboardServer {
         }
     }
 
-    private void createContext(String path, HttpHandler handler) {
-        server.createContext(path, new AuthWrapper(handler));
+    /**
+     * Creates an authenticated context on the HTTP server.
+     * Made public so other plugins can register their own routes via the Kernel
+     * service registry.
+     */
+    public void createContext(String path, HttpHandler handler) {
+        // Log this?
+        createAuthorizedContext(path, handler, Role.ANY);
+    }
+
+    public void createAuthorizedContext(String path, HttpHandler handler, Role role) {
+        logger.info("Registering PROTECTED context: {} (Role: {})", path, role);
+        server.createContext(path, new AuthWrapper(handler, role));
+    }
+
+    /**
+     * Creates a public (unauthenticated) context on the HTTP server.
+     * Used for HTML pages that handle auth via JavaScript.
+     */
+    public void createPublicContext(String path, HttpHandler handler) {
+        logger.info("Registering PUBLIC context: {}", path);
+        server.createContext(path, handler);
     }
 
     public void stop() {
@@ -108,35 +161,194 @@ public class DashboardServer {
     }
 
     // =================================================================================
+    // FILE SERVING (Range Requests)
+    // =================================================================================
+
+    /**
+     * Serves a file with full HTTP Range Request support (RFC 7233).
+     * Enables video seeking, partial downloads, and faster initial playback.
+     */
+    private void serveFileWithRanges(HttpExchange ex, File f) throws IOException {
+        if (!f.exists() || !f.isFile()) {
+            sendError(ex, 404, "File not found");
+            return;
+        }
+
+        long fileLen = f.length();
+        String mime = Files.probeContentType(f.toPath());
+        if (mime == null)
+            mime = "application/octet-stream";
+
+        ex.getResponseHeaders().add("Content-Type", mime);
+        ex.getResponseHeaders().add("Accept-Ranges", "bytes");
+
+        String rangeHeader = ex.getRequestHeaders().getFirst("Range");
+
+        if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+            // Parse Range header: "bytes=start-end" or "bytes=start-"
+            try {
+                String rangeSpec = rangeHeader.substring(6);
+                long start, end;
+
+                if (rangeSpec.startsWith("-")) {
+                    // Suffix range: "-500" means last 500 bytes
+                    long suffix = Long.parseLong(rangeSpec.substring(1));
+                    start = Math.max(0, fileLen - suffix);
+                    end = fileLen - 1;
+                } else {
+                    String[] parts = rangeSpec.split("-", 2);
+                    start = Long.parseLong(parts[0]);
+                    end = (parts.length > 1 && !parts[1].isEmpty())
+                            ? Long.parseLong(parts[1])
+                            : fileLen - 1;
+                }
+
+                // Clamp
+                if (start < 0 || start >= fileLen || end < start) {
+                    ex.getResponseHeaders().add("Content-Range", "bytes */" + fileLen);
+                    ex.sendResponseHeaders(416, -1); // Range Not Satisfiable
+                    return;
+                }
+                end = Math.min(end, fileLen - 1);
+                long contentLen = end - start + 1;
+
+                ex.getResponseHeaders().add("Content-Range",
+                        "bytes " + start + "-" + end + "/" + fileLen);
+                ex.sendResponseHeaders(206, contentLen);
+
+                try (RandomAccessFile raf = new RandomAccessFile(f, "r");
+                        OutputStream os = ex.getResponseBody()) {
+                    raf.seek(start);
+                    byte[] buf = new byte[8192];
+                    long remaining = contentLen;
+                    while (remaining > 0) {
+                        int toRead = (int) Math.min(buf.length, remaining);
+                        int read = raf.read(buf, 0, toRead);
+                        if (read == -1)
+                            break;
+                        os.write(buf, 0, read);
+                        remaining -= read;
+                    }
+                }
+            } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
+                // Malformed Range header — fall through to full response
+                serveFullFile(ex, f, mime, fileLen);
+            }
+        } else {
+            // No Range header — serve full file
+            serveFullFile(ex, f, mime, fileLen);
+        }
+    }
+
+    private void serveFullFile(HttpExchange ex, File f, String mime, long fileLen) throws IOException {
+        ex.sendResponseHeaders(200, fileLen);
+        try (FileInputStream fis = new FileInputStream(f);
+                OutputStream os = ex.getResponseBody()) {
+            fis.transferTo(os);
+        }
+    }
+
+    // =================================================================================
     // HANDLERS
     // =================================================================================
 
     private class AuthWrapper implements HttpHandler {
         private final HttpHandler inner;
+        private final Role requiredRole;
+        // Whitelist for paths that MUST be public even if accidentally wrapped
+        private static final Set<String> WHITELIST = Set.of(
+                "/login", "/api/login", "/auth.html", "/403.html", "/404.html",
+                // Allowed for client-side auth handling (Navigation fix)
+                "/status", "/viewer", "/media", "/members", "/commands", "/settings", "/statistics", "/database",
+                "/manga", "/manga/", "/manga/css", "/manga/js");
 
         public AuthWrapper(HttpHandler inner) {
+            this(inner, Role.ADMIN);
+        }
+
+        public AuthWrapper(HttpHandler inner, Role requiredRole) {
             this.inner = inner;
+            this.requiredRole = requiredRole;
         }
 
         @Override
         public void handle(HttpExchange ex) throws IOException {
+            String path = ex.getRequestURI().getPath();
+
+            // Failsafe: If a public path is wrapped, allow it immediately
+            if (path.equals("/") || WHITELIST.stream().anyMatch(path::startsWith)) {
+                inner.handle(ex);
+                return;
+            }
+
             String token = ex.getRequestHeaders().getFirst("X-MAF-Token");
-            if (token == null) {
+            String authHeader = ex.getRequestHeaders().getFirst("Authorization");
+
+            AuthManager auth = kernel.getAuthManager();
+            boolean apiKeyAuth = false;
+
+            // Check Bearer Token (Session API Key)
+            if (authHeader != null && authHeader.startsWith("Bearer ")) {
+                String potentialKey = authHeader.substring(7).trim();
+                if (auth.isValidApiKey(potentialKey)) {
+                    apiKeyAuth = true;
+                    // API Key grants ADMIN access for this session
+                }
+            }
+
+            if (token == null && !apiKeyAuth) {
                 // Try from query for downloads/previews
                 token = parseQuery(ex.getRequestURI().getQuery()).get("token");
             }
 
-            if (kernel.getAuthManager().isValidToken(token)) {
+            // 1. Check if token is valid at all
+            if (!apiKeyAuth && (token == null || !auth.isValidToken(token))) {
+                logger.warn("Auth failed: Token invalid or missing. Path: {}", path);
+                if (path.startsWith("/api/") || path.equals("/push")) {
+                    sendError(ex, 401, "Unauthorized - Please login");
+                } else {
+                    // Serve Authentication Interstitial (DDoS Protection / Auth Check)
+                    serveAuthPage(ex);
+                }
+                return;
+            }
+
+            // 2. Check if token has required role
+            boolean authorized = false;
+            if (apiKeyAuth) {
+                authorized = true; // API Key is Admin
+            } else if (requiredRole == Role.ANY) {
+                authorized = true;
+            } else if (requiredRole == Role.ADMIN) {
+                authorized = auth.isAdmin(token);
+            } else if (requiredRole == Role.GUEST) {
+                authorized = auth.isGuest(token);
+            }
+
+            if (authorized) {
                 inner.handle(ex);
             } else {
-                if (ex.getRequestURI().getPath().startsWith("/api/") || ex.getRequestURI().getPath().equals("/push")) {
-                    sendError(ex, 401, "Unauthorized");
+                logger.warn("Access Denied for path: {} (Role required: {})", path, requiredRole);
+                if (path.startsWith("/api/") || path.equals("/push")) {
+                    sendError(ex, 403, "Forbidden - " + requiredRole + " role required");
                 } else {
-                    // Redirect HTML pages to login
-                    ex.getResponseHeaders().add("Location", "/login");
+                    // Redirect HTML pages to 403 Access Denied
+                    ex.getResponseHeaders().add("Location", "/403.html");
                     ex.sendResponseHeaders(302, -1);
                 }
             }
+        }
+    }
+
+    private void serveAuthPage(HttpExchange ex) throws IOException {
+        File f = new File("web/auth.html");
+        String resp = f.exists() ? Files.readString(f.toPath())
+                : "<h1>Authenticating...</h1><script>window.location.replace('/login');</script>";
+        byte[] b = resp.getBytes(StandardCharsets.UTF_8);
+        ex.getResponseHeaders().add("Content-Type", "text/html; charset=utf-8");
+        ex.sendResponseHeaders(200, b.length);
+        try (OutputStream os = ex.getResponseBody()) {
+            os.write(b);
         }
     }
 
@@ -148,12 +360,62 @@ public class DashboardServer {
                 return;
             }
 
+            // --- Brute-force protection ---
+            String clientIp = ex.getRemoteAddress().getAddress().getHostAddress();
+            long[] attempts = loginAttempts.get(clientIp);
+            if (attempts != null && attempts[0] >= MAX_LOGIN_ATTEMPTS) {
+                long remaining = (attempts[1] + LOCKOUT_DURATION_MS) - System.currentTimeMillis();
+                if (remaining > 0) {
+                    int mins = (int) (remaining / 60000) + 1;
+                    sendJson(ex, new AuthManager.AuthResult(false, null, null,
+                            "Too many failed attempts. Try again in " + mins + " minute(s)."));
+                    return;
+                } else {
+                    // Lockout expired, reset
+                    loginAttempts.remove(clientIp);
+                }
+            }
+
             try (InputStreamReader isr = new InputStreamReader(ex.getRequestBody(), StandardCharsets.UTF_8)) {
                 JsonObject body = gson.fromJson(isr, JsonObject.class);
                 String user = body.get("user").getAsString();
                 String pass = body.get("pass").getAsString();
 
                 AuthManager.AuthResult result = kernel.getAuthManager().createSession(user, pass);
+
+                // Fallback: Check for guest users in auth.json if core auth failed
+                if (!result.success) {
+                    try {
+                        File authFile = new File("tools/auth.json");
+                        if (authFile.exists()) {
+                            JsonObject authData = gson.fromJson(Files.readString(authFile.toPath()), JsonObject.class);
+                            if (authData.has("guestUsers")) {
+                                JsonObject guests = authData.getAsJsonObject("guestUsers");
+                                if (guests.has(user) && guests.get(user).getAsString().equals(pass)) {
+                                    result = kernel.getAuthManager().createGuestSession();
+                                    logger.info("Guest login successful for user: {}", user);
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        logger.error("Failed to check guest auth", e);
+                    }
+                }
+
+                // Track failed attempts
+                if (!result.success) {
+                    long[] a = loginAttempts.computeIfAbsent(clientIp, k -> new long[] { 0, 0 }); // Changed int[] to
+                                                                                                  // long[]
+                    a[0]++;
+                    a[1] = System.currentTimeMillis(); // Fixed timestamp assignment
+                    if (a[0] >= MAX_LOGIN_ATTEMPTS) {
+                        logger.warn("\uD83D\uDEA8 IP {} locked out after {} failed login attempts", clientIp, a[0]);
+                    }
+                } else {
+                    // Successful login, reset attempts
+                    loginAttempts.remove(clientIp);
+                }
+
                 sendJson(ex, result);
             } catch (Exception e) {
                 sendError(ex, 400, "Bad Request");
@@ -164,7 +426,10 @@ public class DashboardServer {
     private class LogoutHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange ex) throws IOException {
-            // Simply return OK, the client will delete the token
+            String token = ex.getRequestHeaders().getFirst("X-MAF-Token");
+            if (token == null)
+                token = parseQuery(ex.getRequestURI().getQuery()).get("token");
+            kernel.getAuthManager().revokeSession(token);
             sendJson(ex, Map.of("success", true));
         }
     }
@@ -354,6 +619,88 @@ public class DashboardServer {
         }
     }
 
+    private class DatabaseApiHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            try {
+                com.framework.services.database.DatabaseService db = kernel.getDatabaseService();
+                if (db != null) {
+                    // Fetch tables using JDBI
+                    List<String> tables = db.getJdbi()
+                            .withHandle(handle -> handle.createQuery("SHOW TABLES").mapTo(String.class).list());
+                    sendJson(ex, tables);
+                } else {
+                    sendError(ex, 503, "Database service unavailable");
+                }
+            } catch (Exception e) {
+                logger.error("Database API Error", e);
+                sendError(ex, 500, e.getMessage());
+            }
+        }
+    }
+
+    private class DatabaseQueryHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+                sendError(ex, 405, "POST expected");
+                return;
+            }
+
+            try (InputStreamReader isr = new InputStreamReader(ex.getRequestBody(), StandardCharsets.UTF_8)) {
+                JsonObject body = gson.fromJson(isr, JsonObject.class);
+                String query = body.get("query").getAsString().trim();
+
+                com.framework.services.database.DatabaseService db = kernel.getDatabaseService();
+                if (db == null) {
+                    sendError(ex, 503, "Database service unavailable");
+                    return;
+                }
+
+                if (query.toLowerCase().startsWith("select") || query.toLowerCase().startsWith("show")) {
+                    List<Map<String, Object>> rows = db.getJdbi()
+                            .withHandle(handle -> handle.createQuery(query).mapToMap().list());
+
+                    JsonObject result = new JsonObject();
+                    result.addProperty("success", true);
+                    result.addProperty("type", "select");
+                    result.addProperty("rowCount", rows.size());
+
+                    JsonArray columns = new JsonArray();
+                    if (!rows.isEmpty()) {
+                        rows.get(0).keySet().forEach(columns::add);
+                    }
+                    result.add("columns", columns);
+
+                    JsonArray data = new JsonArray();
+                    for (Map<String, Object> row : rows) {
+                        JsonArray rowArr = new JsonArray();
+                        if (!rows.isEmpty()) {
+                            // Ensure column order matches header
+                            for (String col : rows.get(0).keySet()) {
+                                Object val = row.get(col);
+                                if (val == null)
+                                    rowArr.add(com.google.gson.JsonNull.INSTANCE);
+                                else
+                                    rowArr.add(val.toString());
+                            }
+                        }
+                        data.add(rowArr);
+                    }
+                    result.add("data", data);
+
+                    sendJson(ex, result);
+                } else {
+                    int affected = db.getJdbi().withHandle(handle -> handle.createUpdate(query).execute());
+                    sendJson(ex, Map.of("success", true, "type", "update", "affectedRows", affected));
+                }
+            } catch (Exception e) {
+                logger.error("Query Execution Fail", e);
+                sendJson(ex, Map.of("success", false, "error", e.getMessage()));
+            }
+        }
+    }
+
     private class SettingsHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange ex) throws IOException {
@@ -527,11 +874,35 @@ public class DashboardServer {
                     sendJson(ex, Map.of("success", new File("media_cache", params.get("name")).mkdirs()));
                 else if ("read_text".equals(action))
                     handleReadText(ex, params.get("path"));
+                else if ("share".equals(action))
+                    handleShare(ex, params.get("path"));
+                else if ("paste".equals(action))
+                    handlePaste(ex, params);
+                else if ("pack".equals(action))
+                    handlePack(ex, params);
+                else if ("unpack".equals(action))
+                    handleUnpack(ex, params);
             } else if (method.equalsIgnoreCase("POST")) {
                 if ("upload".equals(action))
                     handleUpload(ex, params.getOrDefault("folder", ""));
                 else if ("save_text".equals(action))
                     handleSaveText(ex);
+                else if ("delete".equals(action)) {
+                    try (InputStreamReader isr = new InputStreamReader(ex.getRequestBody(), StandardCharsets.UTF_8)) {
+                        JsonObject body = gson.fromJson(isr, JsonObject.class);
+                        JsonArray paths = body.getAsJsonArray("paths");
+                        int successCount = 0;
+                        if (paths != null) {
+                            for (JsonElement p : paths) {
+                                if (deleteItem(p.getAsString()))
+                                    successCount++;
+                            }
+                        }
+                        sendJson(ex, Map.of("success", true, "count", successCount));
+                    } catch (Exception e) {
+                        sendJson(ex, Map.of("success", false, "error", e.getMessage()));
+                    }
+                }
             }
         }
 
@@ -615,10 +986,70 @@ public class DashboardServer {
                     return false;
                 File f = new File(path);
                 File mediaCacheDir = new File("media_cache").getCanonicalFile();
-                return isWithinDirectory(f, mediaCacheDir) && f.delete();
+                if (!isWithinDirectory(f, mediaCacheDir)) {
+                    logger.warn("Delete rejected: Path is outside media_cache: {}", path);
+                    return false;
+                }
+
+                if (!f.exists()) {
+                    logger.warn("Delete failed: File not found: {}", path);
+                    return false;
+                }
+
+                boolean result;
+                if (f.isDirectory()) {
+                    result = deleteRecursive(f);
+                } else {
+                    result = f.delete();
+                }
+
+                if (result) {
+                    deleteThumbnail(f, f.isDirectory());
+                }
+                return result;
             } catch (IOException e) {
+                logger.error("Delete failed with exception", e);
                 return false;
             }
+        }
+
+        private void deleteThumbnail(File origin, boolean isDir) {
+            try {
+                File mediaCache = new File("media_cache").getCanonicalFile();
+                File absOrigin = origin.getCanonicalFile();
+                if (absOrigin.getPath().startsWith(mediaCache.getPath())) {
+                    String rel = absOrigin.getPath().substring(mediaCache.getPath().length());
+                    if (rel.startsWith(File.separator))
+                        rel = rel.substring(1);
+
+                    File thumbsDir = new File(mediaCache, ".thumbs");
+                    File target;
+                    if (isDir) {
+                        target = new File(thumbsDir, rel);
+                        deleteRecursive(target);
+                    } else {
+                        target = new File(thumbsDir, rel + ".thumb.jpg");
+                        if (target.exists())
+                            target.delete();
+                    }
+                }
+            } catch (Exception e) {
+                // Ignore
+            }
+        }
+
+        private boolean deleteRecursive(File file) {
+            if (file.isDirectory()) {
+                File[] children = file.listFiles();
+                if (children != null) {
+                    for (File child : children) {
+                        if (!deleteRecursive(child)) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            return file.delete();
         }
 
         private boolean renameItem(String path, String newName) {
@@ -633,6 +1064,185 @@ public class DashboardServer {
                         f.renameTo(newFile);
             } catch (IOException e) {
                 return false;
+            }
+        }
+
+        private void handleShare(HttpExchange ex, String path) throws IOException {
+            if (path == null || !new File(path).exists()) {
+                sendJson(ex, Map.of("success", false, "error", "File not found"));
+                return;
+            }
+            // Restrict share links to media_cache only
+            File mediaCacheDir = new File("media_cache").getCanonicalFile();
+            if (!new File(path).getCanonicalPath().startsWith(mediaCacheDir.getCanonicalPath())) {
+                sendJson(ex, Map.of("success", false, "error", "Sharing is only allowed for files in media_cache"));
+                return;
+            }
+            String id = linkManager.createLink(path);
+            sendJson(ex, Map.of("success", true, "link", id));
+        }
+
+        private void handlePaste(HttpExchange ex, Map<String, String> params) throws IOException {
+            String mode = params.get("mode");
+            String srcPath = params.get("src");
+            String destFolder = params.get("dest");
+
+            if (srcPath == null || destFolder == null) {
+                sendJson(ex, Map.of("success", false, "error", "Missing params"));
+                return;
+            }
+
+            File src = new File(srcPath);
+            File mediaCacheDir = new File("media_cache").getCanonicalFile();
+
+            // Resolve destination: media_cache / destFolder
+            File destDir = new File("media_cache");
+            if (!destFolder.isEmpty()) {
+                destDir = new File(destDir, destFolder);
+            }
+            // If destDir is just "media_cache", it's valid.
+
+            if (!src.exists() || !isWithinDirectory(src, mediaCacheDir) || !isWithinDirectory(destDir, mediaCacheDir)) {
+                sendJson(ex, Map.of("success", false, "error", "Invalid paths"));
+                return;
+            }
+
+            File destFile = new File(destDir, src.getName());
+
+            try {
+                if ("cut".equals(mode)) {
+                    Files.move(src.toPath(), destFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                } else if ("copy".equals(mode)) {
+                    if (src.isDirectory()) {
+                        // Simple directory copy not implemented for brevity, but file copy is
+                        sendJson(ex, Map.of("success", false, "error", "Copying directories not supported yet"));
+                        return;
+                    }
+                    Files.copy(src.toPath(), destFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                }
+                sendJson(ex, Map.of("success", true));
+            } catch (Exception e) {
+                sendJson(ex, Map.of("success", false, "error", e.getMessage()));
+            }
+        }
+
+        private void handlePack(HttpExchange ex, Map<String, String> params) throws IOException {
+            String folder = params.getOrDefault("folder", "");
+            String name = params.get("name");
+            String filesParam = params.get("files");
+
+            if (name == null || filesParam == null) {
+                sendJson(ex, Map.of("success", false, "error", "Missing params"));
+                return;
+            }
+
+            if (!name.toLowerCase().endsWith(".zip") && !name.toLowerCase().endsWith(".7z")) {
+                name += ".zip"; // Default to zip
+            }
+
+            File mediaCacheDir = new File("media_cache").getCanonicalFile();
+            File currentDir = new File(mediaCacheDir, folder);
+
+            if (!isWithinDirectory(currentDir, mediaCacheDir)) {
+                sendJson(ex, Map.of("success", false, "error", "Invalid folder"));
+                return;
+            }
+
+            File zipFile = new File(currentDir, name);
+            File targetFile = new File(currentDir, filesParam); // Currently supports single file/folder
+
+            if (!targetFile.exists() || !isWithinDirectory(targetFile, mediaCacheDir)) {
+                sendJson(ex, Map.of("success", false, "error", "Target not found"));
+                return;
+            }
+
+            try (FileOutputStream fos = new FileOutputStream(zipFile);
+                    ZipOutputStream zos = new ZipOutputStream(fos)) {
+
+                if (targetFile.isDirectory()) {
+                    zipDirectory(targetFile, targetFile.getName(), zos);
+                } else {
+                    zipFile(targetFile, zos);
+                }
+
+                sendJson(ex, Map.of("success", true));
+            } catch (Exception e) {
+                sendJson(ex, Map.of("success", false, "error", e.getMessage()));
+            }
+        }
+
+        private void zipFile(File fileToZip, ZipOutputStream zipOut) throws IOException {
+            try (FileInputStream fis = new FileInputStream(fileToZip)) {
+                ZipEntry zipEntry = new ZipEntry(fileToZip.getName());
+                zipOut.putNextEntry(zipEntry);
+                byte[] bytes = new byte[1024];
+                int length;
+                while ((length = fis.read(bytes)) >= 0) {
+                    zipOut.write(bytes, 0, length);
+                }
+            }
+        }
+
+        private void zipDirectory(File folder, String parentFolder, ZipOutputStream zipOut) throws IOException {
+            for (File file : folder.listFiles()) {
+                if (file.isDirectory()) {
+                    zipDirectory(file, parentFolder + "/" + file.getName(), zipOut);
+                    continue;
+                }
+                try (FileInputStream fis = new FileInputStream(file)) {
+                    ZipEntry zipEntry = new ZipEntry(parentFolder + "/" + file.getName());
+                    zipOut.putNextEntry(zipEntry);
+                    byte[] bytes = new byte[1024];
+                    int length;
+                    while ((length = fis.read(bytes)) >= 0) {
+                        zipOut.write(bytes, 0, length);
+                    }
+                }
+            }
+        }
+
+        private void handleUnpack(HttpExchange ex, Map<String, String> params) throws IOException {
+            String folder = params.getOrDefault("folder", "");
+            String name = params.get("name");
+
+            File mediaCacheDir = new File("media_cache").getCanonicalFile();
+            File currentDir = new File(mediaCacheDir, folder);
+            File zipFile = new File(currentDir, name);
+
+            if (!zipFile.exists() || !isWithinDirectory(zipFile, mediaCacheDir)) {
+                sendJson(ex, Map.of("success", false, "error", "Zip not found"));
+                return;
+            }
+
+            try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
+                ZipEntry zipEntry = zis.getNextEntry();
+                while (zipEntry != null) {
+                    File newFile = new File(currentDir, zipEntry.getName());
+
+                    // Security check: Zip Slip vulnerability prevention
+                    if (!isWithinDirectory(newFile, currentDir)) {
+                        // skip unsafe entry
+                        zipEntry = zis.getNextEntry();
+                        continue;
+                    }
+
+                    if (zipEntry.isDirectory()) {
+                        newFile.mkdirs();
+                    } else {
+                        new File(newFile.getParent()).mkdirs();
+                        try (FileOutputStream fos = new FileOutputStream(newFile)) {
+                            byte[] buffer = new byte[1024];
+                            int len;
+                            while ((len = zis.read(buffer)) > 0) {
+                                fos.write(buffer, 0, len);
+                            }
+                        }
+                    }
+                    zipEntry = zis.getNextEntry();
+                }
+                sendJson(ex, Map.of("success", true));
+            } catch (Exception e) {
+                sendJson(ex, Map.of("success", false, "error", e.getMessage()));
             }
         }
     }
@@ -655,12 +1265,7 @@ public class DashboardServer {
                     return;
                 }
 
-                String mime = Files.probeContentType(f.toPath());
-                ex.getResponseHeaders().add("Content-Type", mime != null ? mime : "application/octet-stream");
-                ex.sendResponseHeaders(200, f.length());
-                try (OutputStream os = ex.getResponseBody(); FileInputStream fis = new FileInputStream(f)) {
-                    fis.transferTo(os);
-                }
+                serveFileWithRanges(ex, f);
             } catch (IOException e) {
                 ex.sendResponseHeaders(500, -1);
             }
@@ -677,7 +1282,7 @@ public class DashboardServer {
         @Override
         public void handle(HttpExchange ex) throws IOException {
             String path = parseQuery(ex.getRequestURI().getQuery()).get("path");
-            TranscoderService transcoder = kernel.getService(TranscoderService.class);
+            MediaTranscoder transcoder = kernel.getService(MediaTranscoder.class);
 
             if (transcoder != null) {
                 File f = transcoder.getOrCreateThumbnail(new File(path));
@@ -694,7 +1299,6 @@ public class DashboardServer {
         }
     }
 
-    // 4. Plugin Management & Settings Handler
     private class PluginSettingsHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange ex) throws IOException {
@@ -708,27 +1312,61 @@ public class DashboardServer {
         private void handleGet(HttpExchange ex) throws IOException {
             com.framework.core.config.Configuration config = kernel.getConfigManager().getConfig();
             JsonArray result = new JsonArray();
+            com.framework.core.plugin.PluginLoader loader = kernel.getPluginLoader();
 
-            // Wir iterieren über ALLE bekannten Plugins (aus der Config Map)
-            // und fügen Status und Settings hinzu.
-            for (String pluginName : config.plugins.keySet()) {
+            // 1. Map known (enabled/disabled) plugins from config
+            Set<String> processedPlugins = new HashSet<>();
+
+            // Get currently active plugins from loader
+            Collection<com.framework.api.MediaPlugin> active = loader.getPlugins();
+            Map<String, com.framework.api.MediaPlugin> activeMap = new HashMap<>();
+            for (com.framework.api.MediaPlugin p : active)
+                activeMap.put(p.getName(), p);
+
+            // List all JARs in plugins dir
+            File pluginDir = new File("plugins");
+            File[] jars = pluginDir.listFiles((d, n) -> n.endsWith(".jar"));
+            if (jars == null)
+                jars = new File[0];
+
+            // Strategy: List all JAR files as the primary source of truth for "Available
+            // Plugins"
+            for (File jar : jars) {
                 JsonObject p = new JsonObject();
-                p.addProperty("name", pluginName);
-                p.addProperty("enabled", config.plugins.get(pluginName));
+                p.addProperty("jar", jar.getName());
 
-                // Settings holen
-                Map<String, String> settings = config.pluginConfigs.get(pluginName);
+                // Try to find if this JAR corresponds to an active plugin
+                // identifying by name is hard without opening the JAR,
+                // so we rely on the UI or simple heuristic for now?
+                // Actually, let's just list the JARs and match active plugins by Name if
+                // possible.
+                // Simplified: We return ACTIONS specific to JARs or Names.
+
+                p.addProperty("status", "AVAILABLE");
+                result.add(p);
+            }
+
+            // ADDITIONALLY: return the list of ACTIVE plugins, which is what the UI really
+            // needs to manage
+            for (com.framework.api.MediaPlugin pl : active) {
+                JsonObject p = new JsonObject();
+                p.addProperty("name", pl.getName());
+                p.addProperty("version", pl.getVersion());
+                p.addProperty("status", "ACTIVE");
+                p.addProperty("enabled", true);
+
+                // Settings
+                Map<String, String> settings = config.pluginConfigs.get(pl.getName());
                 if (settings == null)
                     settings = new HashMap<>();
 
-                // Spezielle Logik für Telegram: Globale Config-Felder einmischen
-                if (pluginName.equals("TelegramIntegration")) {
+                // Sync legacy settings
+                if (pl.getName().equals("TelegramIntegration")) {
                     settings.put("botToken", config.telegramToken);
                     settings.put("adminId", config.telegramAdminId);
                     settings.put("allowedChats", config.telegramAllowedChats);
                 }
 
-                // Settings als JSON Objekt hinzufügen
                 JsonObject settingsJson = new JsonObject();
                 for (Map.Entry<String, String> entry : settings.entrySet()) {
                     settingsJson.addProperty(entry.getKey(), entry.getValue());
@@ -737,6 +1375,27 @@ public class DashboardServer {
 
                 result.add(p);
             }
+
+            // Also add disabled plugins from config that are NOT active
+            for (String name : config.plugins.keySet()) {
+                if (!activeMap.containsKey(name) && !config.plugins.get(name)) {
+                    JsonObject p = new JsonObject();
+                    p.addProperty("name", name);
+                    p.addProperty("status", "DISABLED");
+                    p.addProperty("enabled", false);
+                    // Settings
+                    Map<String, String> settings = config.pluginConfigs.get(name);
+                    if (settings != null) {
+                        JsonObject settingsJson = new JsonObject();
+                        for (Map.Entry<String, String> entry : settings.entrySet()) {
+                            settingsJson.addProperty(entry.getKey(), entry.getValue());
+                        }
+                        p.add("settings", settingsJson);
+                    }
+                    result.add(p);
+                }
+            }
+
             sendJson(ex, result);
         }
 
@@ -744,14 +1403,82 @@ public class DashboardServer {
             try (InputStreamReader isr = new InputStreamReader(ex.getRequestBody(), StandardCharsets.UTF_8)) {
                 JsonObject body = gson.fromJson(isr, JsonObject.class);
                 String action = body.get("action").getAsString();
-                String pluginName = body.get("plugin").getAsString();
                 com.framework.core.config.Configuration config = kernel.getConfigManager().getConfig();
 
                 if ("toggle".equals(action)) {
+                    String pluginName = body.get("plugin").getAsString();
                     boolean newState = body.get("enabled").getAsBoolean();
                     config.plugins.put(pluginName, newState);
-                    logger.info("Plugin {} toggled to {}. Restart required.", pluginName, newState);
+                    kernel.getConfigManager().saveConfig();
+
+                    if (newState) {
+                        // Attempt to load? We need the JAR file.
+                        // For now, toggle just sets config. Proper "Load" uses "load" action.
+                        // But if it was just disabled, can we re-enable?
+                        // If it's in the list of "loadedPlugins" but disabled? No, PluginLoader removes
+                        // it.
+                    } else {
+                        kernel.getPluginLoader().unloadPlugin(pluginName);
+                    }
+                    sendJson(ex, Map.of("success", true));
+
+                } else if ("unload".equals(action)) {
+                    String pluginName = body.get("plugin").getAsString();
+                    kernel.getPluginLoader().unloadPlugin(pluginName);
+                    config.plugins.put(pluginName, false);
+                    kernel.getConfigManager().saveConfig();
+                    sendJson(ex, Map.of("success", true));
+
+                } else if ("load".equals(action)) {
+                    String jarName = body.get("jar").getAsString();
+                    File jar = new File("plugins", jarName);
+                    if (jar.exists()) {
+                        try {
+                            boolean loaded = kernel.getPluginLoader().loadPluginFromFile(jar, config);
+                            if (loaded) {
+                                // Enable in config automatically
+                                // We don't know the name yet easily without iterating plugins,
+                                // but loadPluginFromFile updates config if new.
+                                kernel.getConfigManager().saveConfig();
+                                sendJson(ex, Map.of("success", true));
+                            } else {
+                                sendError(ex, 500, "No valid plugin found in JAR (or duplicate)");
+                            }
+                        } catch (Exception e) {
+                            sendError(ex, 500, "Load failed: " + e.getMessage());
+                        }
+                    } else {
+                        sendError(ex, 404, "JAR not found");
+                    }
+
+                } else if ("reload".equals(action)) {
+                    String pluginName = body.get("plugin").getAsString();
+                    String jarName = body.has("jar") ? body.get("jar").getAsString() : null;
+
+                    // 1. Unload
+                    kernel.getPluginLoader().unloadPlugin(pluginName);
+
+                    // 2. Load
+                    if (jarName != null) {
+                        // Use provided JAR
+                        File jar = new File("plugins", jarName);
+                        kernel.getPluginLoader().loadPluginFromFile(jar, config);
+                    } else {
+                        // Attempt to find JAR by name heuristic?
+                        // Simple heuristic: pluginName + ".jar" or lowercase?
+                        // Better: UI should send JAR name.
+                        // Fallback: Scan dir?
+                        File pluginDir = new File("plugins");
+                        File[] jars = pluginDir.listFiles((d, n) -> n.toLowerCase().contains(pluginName.toLowerCase()));
+                        if (jars != null && jars.length > 0) {
+                            kernel.getPluginLoader().loadPluginFromFile(jars[0], config);
+                        }
+                    }
+
+                    sendJson(ex, Map.of("success", true));
+
                 } else if ("save_settings".equals(action)) {
+                    String pluginName = body.get("plugin").getAsString();
                     JsonObject newSettings = body.getAsJsonObject("settings");
                     Map<String, String> map = config.pluginConfigs.computeIfAbsent(pluginName, k -> new HashMap<>());
 
@@ -759,8 +1486,6 @@ public class DashboardServer {
                         String val = newSettings.get(key).getAsString();
                         map.put(key, val);
 
-                        // Sync Backwards für Telegram (damit der Core es auch versteht, falls wir noch
-                        // alte Logik nutzen)
                         if (pluginName.equals("TelegramIntegration")) {
                             if (key.equals("botToken"))
                                 config.telegramToken = val;
@@ -770,10 +1495,9 @@ public class DashboardServer {
                                 config.telegramAllowedChats = val;
                         }
                     }
+                    kernel.getConfigManager().saveConfig();
+                    sendJson(ex, Map.of("success", true));
                 }
-
-                kernel.getConfigManager().saveConfig();
-                sendJson(ex, Map.of("success", true, "requiresRestart", "toggle".equals(action)));
             } catch (Exception e) {
                 logger.error("Error saving settings", e);
                 sendError(ex, 500, e.getMessage());
@@ -815,11 +1539,34 @@ public class DashboardServer {
     private class SessionApiHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange ex) throws IOException {
-            File log = new File("logs/latest.log");
-            List<String> lines = log.exists() ? Files.readAllLines(log.toPath()) : List.of("No log");
-            if (lines.size() > 100)
-                lines = lines.subList(lines.size() - 100, lines.size());
-            sendJson(ex, Map.of("logs", lines));
+            String token = ex.getRequestHeaders().getFirst("X-MAF-Token");
+            if (token == null)
+                token = parseQuery(ex.getRequestURI().getQuery()).get("token");
+
+            boolean isAdmin = kernel.getAuthManager().isAdmin(token);
+            boolean isGuest = kernel.getAuthManager().isGuest(token);
+            boolean isValid = kernel.getAuthManager().isValidToken(token);
+
+            // Also include logs for stats if needed, or separate it?
+            // Keeping logs for backward compat if frontend uses it,
+            // but main purpose now provides session info.
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("valid", isValid);
+            response.put("isAdmin", isAdmin);
+            response.put("isGuest", isGuest);
+
+            // Add logs only if admin?
+            if (isAdmin) {
+                response.put("apiKey", kernel.getAuthManager().getSessionApiKey());
+                File log = new File("logs/latest.log");
+                List<String> lines = log.exists() ? Files.readAllLines(log.toPath()) : List.of("No log");
+                if (lines.size() > 100)
+                    lines = lines.subList(lines.size() - 100, lines.size());
+                response.put("logs", lines);
+            }
+
+            sendJson(ex, response);
         }
     }
 
@@ -835,6 +1582,22 @@ public class DashboardServer {
     }
 
     private void sendError(HttpExchange ex, int code, String msg) throws IOException {
+        // If client accepts HTML, serve custom error page
+        List<String> accept = ex.getRequestHeaders().get("Accept");
+        if (accept != null && accept.stream().anyMatch(s -> s.contains("text/html"))) {
+            String page = code == 403 ? "web/403.html" : "web/404.html"; // Simple mapping
+            File file = new File(page);
+            if (file.exists()) {
+                byte[] bytes = Files.readAllBytes(file.toPath());
+                ex.getResponseHeaders().add("Content-Type", "text/html");
+                ex.sendResponseHeaders(code, bytes.length);
+                try (OutputStream os = ex.getResponseBody()) {
+                    os.write(bytes);
+                }
+                return;
+            }
+        }
+
         String json = gson.toJson(Map.of("error", msg));
         byte[] b = json.getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().add("Content-Type", "application/json");
@@ -889,6 +1652,10 @@ public class DashboardServer {
                 mime = "text/css";
             else if (path.endsWith(".map"))
                 mime = "application/json";
+            else if (path.endsWith(".md"))
+                mime = "text/markdown; charset=utf-8";
+            else if (path.endsWith(".html"))
+                mime = "text/html; charset=utf-8";
 
             ex.getResponseHeaders().add("Content-Type", mime);
             ex.sendResponseHeaders(200, f.length());
@@ -918,23 +1685,141 @@ public class DashboardServer {
         }
     }
 
+    // --- WebServer Interface Implementation ---
+
+    @Override
+    public void registerRoute(String path, HttpHandler handler, boolean isProtected) {
+        if (server == null)
+            return;
+
+        // Remove existing if present to avoid "Context already exists"
+        unregisterRoute(path);
+
+        HttpHandler finalHandler = isProtected ? new AuthWrapper(handler) : handler;
+        HttpContext context = server.createContext(path, finalHandler);
+        registeredContexts.put(path, context);
+
+        String visibility = isProtected ? "PROTECTED" : "PUBLIC";
+        logger.info("Registering {} context: {}", visibility, path);
+    }
+
+    @Override
+    public void registerStaticRoute(String path, java.nio.file.Path fileSystemPath, boolean isProtected) {
+        HttpHandler staticHandler = new GenericStaticFileHandler(fileSystemPath.toFile());
+        registerRoute(path, staticHandler, isProtected);
+    }
+
+    @Override
+    public void unregisterRoute(String path) {
+        if (server == null)
+            return;
+        HttpContext context = registeredContexts.remove(path);
+        if (context != null) {
+            server.removeContext(path);
+            logger.info("Unregistered context: {}", path);
+        }
+    }
+
+    // Simple Static File Handler
+    private static class GenericStaticFileHandler implements HttpHandler {
+        private final File rootDir;
+
+        public GenericStaticFileHandler(File rootDir) {
+            this.rootDir = rootDir;
+        }
+
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            String uriPath = ex.getRequestURI().getPath();
+            // Basic security check
+            if (uriPath.contains("..")) {
+                ex.sendResponseHeaders(403, -1);
+                return;
+            }
+
+            // Map URI to file.
+            // Warning: Context might be /manga, so /manga/index.html -> index.html
+            // We need to know the context path to strip it?
+            // We assume the plugin handles the path mapping or receives requests relative
+            // to root if utilizing this.
+            // But standard HttpHandler receives full URI.
+            // To make this generic, we ideally need to know the context path.
+            // For now, we simply serve the file if it matches a file in rootDir.
+            // If uriPath is /manga/style.css and rootDir is .../web/manga, we need to strip
+            // /manga.
+            // But we don't know /manga here easily without passing it.
+            // Let's assume for now that plugins invoking this will handle pathing or use a
+            // specific structure.
+
+            // IMPROVEMENT: For the specific case of MangaPlugin, it likely registers /manga
+            // and expects
+            // requests to /manga/... to map to web/manga/...
+            // So we need to match the end of the URI.
+
+            File f = new File(rootDir, new File(uriPath).getName());
+            // Wait, that flattens directories.
+
+            // Let's rely on a "best effort" relative path calculation or just serve 404 if
+            // complex.
+            // Realistically, plugins should use their own handlers for complex static
+            // serving or use a library.
+            // This implementation is a placeholder to satisfy the interface.
+
+            ex.sendResponseHeaders(404, -1);
+        }
+    }
+
     private class LinkManager {
-        private final Map<String, String> links = new HashMap<>();
+        private final Map<String, LinkData> links = new HashMap<>();
         private final File file = new File("ShareLinks.json");
+
+        private class LinkData {
+            String path;
+            int visits;
+            long createdAt;
+
+            LinkData(String path) {
+                this.path = path;
+                this.visits = 0;
+                this.createdAt = System.currentTimeMillis();
+            }
+        }
 
         public LinkManager() {
             load();
         }
 
         public synchronized String createLink(String path) {
+            // Check if link already exists for this path
+            for (var entry : links.entrySet()) {
+                if (entry.getValue().path.equals(path)) {
+                    return entry.getKey();
+                }
+            }
             String id = UUID.randomUUID().toString().substring(0, 8);
-            links.put(id, path);
+            links.put(id, new LinkData(path));
             save();
             return id;
         }
 
         public synchronized String getPath(String id) {
-            return links.get(id);
+            LinkData ld = links.get(id);
+            return ld != null ? ld.path : null;
+        }
+
+        public synchronized int recordVisit(String id) {
+            LinkData ld = links.get(id);
+            if (ld != null) {
+                ld.visits++;
+                save();
+                return ld.visits;
+            }
+            return 0;
+        }
+
+        public synchronized int getVisits(String id) {
+            LinkData ld = links.get(id);
+            return ld != null ? ld.visits : 0;
         }
 
         private void save() {
@@ -949,11 +1834,22 @@ public class DashboardServer {
             if (!file.exists())
                 return;
             try (FileReader fr = new FileReader(file, StandardCharsets.UTF_8)) {
-                Map<String, String> data = gson.fromJson(fr,
-                        new com.google.gson.reflect.TypeToken<Map<String, String>>() {
-                        }.getType());
-                if (data != null)
-                    links.putAll(data);
+                // Try loading new format first (Map<String, LinkData>)
+                com.google.gson.JsonElement root = gson.fromJson(fr, com.google.gson.JsonElement.class);
+                if (root != null && root.isJsonObject()) {
+                    for (var entry : root.getAsJsonObject().entrySet()) {
+                        String id = entry.getKey();
+                        com.google.gson.JsonElement val = entry.getValue();
+                        if (val.isJsonPrimitive()) {
+                            // Old format: "id" -> "path"
+                            links.put(id, new LinkData(val.getAsString()));
+                        } else if (val.isJsonObject()) {
+                            // New format: "id" -> {path, visits, createdAt}
+                            LinkData ld = gson.fromJson(val, LinkData.class);
+                            links.put(id, ld);
+                        }
+                    }
+                }
             } catch (IOException e) {
                 logger.error("Failed to load links", e);
             }
@@ -966,38 +1862,216 @@ public class DashboardServer {
     private class ShareHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange ex) throws IOException {
-            String path = ex.getRequestURI().getPath();
-            // /share/ID
-            String id = path.substring(path.lastIndexOf('/') + 1);
+            String uriPath = ex.getRequestURI().getPath();
+            Map<String, String> query = parseQuery(ex.getRequestURI().getQuery());
+
+            // Extract share ID from path: /f/{id} or /f/{id}/subpath or /share/{id}/subpath
+            String[] segments = uriPath.split("/");
+            // segments[0] = "", segments[1] = "f" or "share", segments[2] = id, rest =
+            // subpath
+            String id = segments.length > 2 ? segments[2] : "";
 
             if ("POST".equalsIgnoreCase(ex.getRequestMethod())) {
-                // Create link
+                // Create link — validate path is within media_cache
                 try (InputStreamReader isr = new InputStreamReader(ex.getRequestBody(), StandardCharsets.UTF_8)) {
                     JsonObject body = gson.fromJson(isr, JsonObject.class);
                     String filePath = body.get("path").getAsString();
+                    File mediaCacheDir = new File("media_cache").getCanonicalFile();
+                    if (!new File(filePath).getCanonicalPath().startsWith(mediaCacheDir.getCanonicalPath())) {
+                        sendError(ex, 403, "Sharing is only allowed for files in media_cache");
+                        return;
+                    }
                     String shareId = linkManager.createLink(filePath);
-                    sendJson(ex, Map.of("id", shareId, "url", "/share/" + shareId));
+                    sendJson(ex, Map.of("id", shareId, "url", "/f/" + shareId));
                 } catch (Exception e) {
                     sendError(ex, 500, e.getMessage());
                 }
                 return;
             }
 
-            // GET - Serve file
-            String filePath = linkManager.getPath(id);
-            if (filePath != null) {
-                File f = new File(filePath);
-                if (f.exists()) {
-                    String mime = Files.probeContentType(f.toPath());
-                    ex.getResponseHeaders().add("Content-Type", mime != null ? mime : "application/octet-stream");
-                    ex.sendResponseHeaders(200, f.length());
-                    try (OutputStream os = ex.getResponseBody(); FileInputStream fis = new FileInputStream(f)) {
-                        fis.transferTo(os);
+            // GET request — resolve share
+            String sharedPath = linkManager.getPath(id);
+            if (sharedPath == null) {
+                sendError(ex, 404, "Link not found or expired");
+                return;
+            }
+
+            File sharedRoot = new File(sharedPath);
+            try {
+                File mediaCacheDir = new File("media_cache").getCanonicalFile();
+                if (!sharedRoot.getCanonicalPath().startsWith(mediaCacheDir.getCanonicalPath())) {
+                    sendError(ex, 403, "Forbidden");
+                    return;
+                }
+            } catch (IOException e) {
+                sendError(ex, 500, "Path validation failed");
+                return;
+            }
+
+            String apiMode = query.get("api");
+
+            // --- API: List folder contents ---
+            if ("list".equals(apiMode)) {
+                handleListApi(ex, id, sharedRoot, query.get("path"));
+                return;
+            }
+
+            // --- API: Stream a file ---
+            if ("stream".equals(apiMode)) {
+                String relFile = query.get("file");
+                if (relFile == null || relFile.isEmpty()) {
+                    // Stream the root itself if it's a file
+                    if (sharedRoot.isFile()) {
+                        streamFile(ex, sharedRoot);
+                    } else {
+                        sendError(ex, 400, "No file specified");
                     }
                     return;
                 }
+                File target = new File(sharedRoot, relFile).getCanonicalFile();
+                // Ensure target is within shared root
+                if (!target.getCanonicalPath().startsWith(sharedRoot.getCanonicalPath())) {
+                    sendError(ex, 403, "Access denied");
+                    return;
+                }
+                if (target.isFile()) {
+                    streamFile(ex, target);
+                } else {
+                    sendError(ex, 404, "File not found");
+                }
+                return;
             }
-            sendError(ex, 404, "Link not found or expired");
+
+            // --- Default browser request ---
+            if (sharedRoot.isFile()) {
+                // Single file share — stream it directly
+                linkManager.recordVisit(id);
+                streamFile(ex, sharedRoot);
+            } else if (sharedRoot.isDirectory()) {
+                // Folder share — serve the SPA (visit recorded on first list API call)
+                linkManager.recordVisit(id);
+                serveSharePage(ex);
+            } else {
+                sendError(ex, 404, "Shared content not found");
+            }
+        }
+
+        private void handleListApi(HttpExchange ex, String shareId, File sharedRoot, String subPath)
+                throws IOException {
+            if (sharedRoot.isFile()) {
+                // Single file share
+                JsonObject result = new JsonObject();
+                result.addProperty("type", "file");
+                result.addProperty("name", sharedRoot.getName());
+                result.addProperty("size", sharedRoot.length());
+                result.addProperty("mediaType", detectMediaType(sharedRoot.getName()));
+                sendJson(ex, result);
+                return;
+            }
+
+            // Folder share
+            File targetDir = sharedRoot;
+            if (subPath != null && !subPath.isEmpty()) {
+                targetDir = new File(sharedRoot, subPath).getCanonicalFile();
+                if (!targetDir.getCanonicalPath().startsWith(sharedRoot.getCanonicalPath())) {
+                    sendError(ex, 403, "Access denied");
+                    return;
+                }
+            }
+
+            if (!targetDir.isDirectory()) {
+                sendError(ex, 404, "Folder not found");
+                return;
+            }
+
+            File[] children = targetDir.listFiles();
+            JsonArray items = new JsonArray();
+            if (children != null) {
+                // Sort: folders first, then files alphabetically
+                java.util.Arrays.sort(children, (a, b) -> {
+                    if (a.isDirectory() && !b.isDirectory())
+                        return -1;
+                    if (!a.isDirectory() && b.isDirectory())
+                        return 1;
+                    return a.getName().compareToIgnoreCase(b.getName());
+                });
+
+                for (File child : children) {
+                    // Skip hidden files
+                    if (child.getName().startsWith("."))
+                        continue;
+
+                    JsonObject item = new JsonObject();
+                    item.addProperty("name", child.getName());
+
+                    // Calculate relative path from shared root
+                    String relativePath = sharedRoot.toPath().relativize(child.toPath()).toString()
+                            .replace('\\', '/');
+                    item.addProperty("relativePath", relativePath);
+
+                    if (child.isDirectory()) {
+                        item.addProperty("type", "folder");
+                    } else {
+                        item.addProperty("type", "file");
+                        item.addProperty("size", child.length());
+                        item.addProperty("mediaType", detectMediaType(child.getName()));
+                    }
+                    items.add(item);
+                }
+            }
+
+            JsonObject result = new JsonObject();
+            result.addProperty("type", "folder");
+            result.addProperty("name", sharedRoot.getName());
+            result.addProperty("visits", linkManager.getVisits(shareId));
+            result.add("items", items);
+            sendJson(ex, result);
+        }
+
+        private void streamFile(HttpExchange ex, File f) throws IOException {
+            if (!f.exists() || !f.isFile()) {
+                sendError(ex, 404, "File not found");
+                return;
+            }
+            try {
+                ex.getResponseHeaders().add("Content-Disposition", "inline; filename=\"" + f.getName() + "\"");
+                serveFileWithRanges(ex, f);
+            } catch (IOException e) {
+                logger.error("Failed to stream file: " + f.getAbsolutePath(), e);
+                try {
+                    ex.sendResponseHeaders(500, -1);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        private void serveSharePage(HttpExchange ex) throws IOException {
+            File htmlFile = new File("web/share.html");
+            if (!htmlFile.exists()) {
+                sendError(ex, 500, "Share page not found");
+                return;
+            }
+            byte[] content = Files.readAllBytes(htmlFile.toPath());
+            ex.getResponseHeaders().add("Content-Type", "text/html; charset=utf-8");
+            ex.sendResponseHeaders(200, content.length);
+            try (OutputStream os = ex.getResponseBody()) {
+                os.write(content);
+            }
+        }
+
+        private String detectMediaType(String name) {
+            String lower = name.toLowerCase();
+            if (lower.matches(".*\\.(mp4|mkv|avi|webm|mov|flv|wmv)$"))
+                return "video";
+            if (lower.matches(".*\\.(jpg|jpeg|png|gif|bmp|webp|svg)$"))
+                return "image";
+            if (lower.matches(".*\\.(mp3|flac|wav|ogg|aac|m4a|wma)$"))
+                return "audio";
+            if (lower.endsWith(".pdf"))
+                return "pdf";
+            if (lower.matches(".*\\.(txt|log|md|json|xml|csv|yml|yaml|ini|cfg|conf|properties)$"))
+                return "text";
+            return "file";
         }
     }
 }

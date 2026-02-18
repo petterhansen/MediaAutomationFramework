@@ -25,20 +25,28 @@ public class AuthManager {
     private final Gson gson;
     private AuthData data;
     private final Map<String, Session> activeSessions = new ConcurrentHashMap<>();
+    private final String sessionApiKey;
+
+    public String getSessionApiKey() {
+        return sessionApiKey;
+    }
 
     private static class Session {
         long expiry;
         String user;
+        String role; // "admin" or "guest"
     }
 
     public static class AuthResult {
         public boolean success;
         public String token;
+        public String role;
         public String error;
 
-        public AuthResult(boolean s, String t, String e) {
+        public AuthResult(boolean s, String t, String r, String e) {
             success = s;
             token = t;
+            role = r;
             error = e;
         }
     }
@@ -46,6 +54,8 @@ public class AuthManager {
     public AuthManager(Kernel kernel) {
         this.authFile = new File(kernel.getToolsDir(), "auth.json");
         this.gson = new GsonBuilder().setPrettyPrinting().create();
+        this.sessionApiKey = UUID.randomUUID().toString();
+        logger.info("🔑 SESSION API KEY: {}", sessionApiKey);
         load();
     }
 
@@ -83,6 +93,9 @@ public class AuthManager {
     }
 
     public boolean checkWebCredentials(String user, String pass) {
+        if (user == null || pass == null || pass.isEmpty()) {
+            return false;
+        }
         return data.adminUsername.equals(user) && data.adminPassword.equals(pass);
     }
 
@@ -91,22 +104,24 @@ public class AuthManager {
             String token = UUID.randomUUID().toString();
             Session s = new Session();
             s.user = user;
+            s.role = "admin";
             s.expiry = System.currentTimeMillis() + TimeUnit.HOURS.toMillis(24);
             activeSessions.put(token, s);
             logger.info("Session created for user: {}", s.user);
-            return new AuthResult(true, token, null);
+            return new AuthResult(true, token, "ADMIN", null);
         }
-        return new AuthResult(false, null, "Invalid credentials");
+        return new AuthResult(false, null, null, "Invalid credentials");
     }
 
     public AuthResult createGuestSession() {
         String token = UUID.randomUUID().toString();
         Session s = new Session();
         s.user = "guest";
+        s.role = "guest";
         s.expiry = System.currentTimeMillis() + TimeUnit.HOURS.toMillis(24);
         activeSessions.put(token, s);
         logger.info("Guest session created");
-        return new AuthResult(true, token, null);
+        return new AuthResult(true, token, "GUEST", null);
     }
 
     public boolean isValidToken(String token) {
@@ -120,6 +135,29 @@ public class AuthManager {
             return false;
         }
         return true;
+    }
+
+    public boolean isAdmin(String token) {
+        if (!isValidToken(token))
+            return false;
+        Session s = activeSessions.get(token);
+        return s != null && "admin".equals(s.role);
+    }
+
+    public void revokeSession(String token) {
+        if (token != null)
+            activeSessions.remove(token);
+    }
+
+    public boolean isGuest(String token) {
+        if (!isValidToken(token))
+            return false;
+        Session s = activeSessions.get(token);
+        return s != null && "guest".equals(s.user);
+    }
+
+    public boolean isValidApiKey(String key) {
+        return sessionApiKey != null && sessionApiKey.equals(key);
     }
 
     public boolean isAdmin(long userId) {

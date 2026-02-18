@@ -107,6 +107,11 @@ public class Kernel {
         logger.info("Service registered: {}", clazz.getSimpleName());
     }
 
+    public <T> void unregisterService(Class<T> clazz) {
+        services.remove(clazz);
+        logger.info("Service DEREGISTERED: {}", clazz.getSimpleName());
+    }
+
     public <T> T getService(Class<T> clazz) {
         return clazz.cast(services.get(clazz));
     }
@@ -115,6 +120,11 @@ public class Kernel {
 
     public void registerCommand(String cmd, CommandHandler handler) {
         commandRegistry.put(cmd.toLowerCase(), handler);
+    }
+
+    public void unregisterCommand(String cmd) {
+        commandRegistry.remove(cmd.toLowerCase());
+        logger.info("Command DEREGISTERED: {}", cmd);
     }
 
     public Map<String, CommandHandler> getCommandRegistry() {
@@ -139,6 +149,10 @@ public class Kernel {
     // --- Getters ---
     public File getToolsDir() {
         return toolsDir;
+    }
+
+    public PluginLoader getPluginLoader() {
+        return pluginLoader;
     }
 
     public ConfigManager getConfigManager() {

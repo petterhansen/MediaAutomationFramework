@@ -41,3 +41,24 @@ core/tools/auth.json
 core/tools/config.json
 core/tools/framework.db.mv.db
 core/tools/stats.json
+core/logs/framework-2026-01-16.log
+convert_md_to_pdf.py
+/core/logs
+/deployed_jars
+/logs
+/old_predecessor_files
+/tools
+/web
+/wiki
+core/dependency-reduced-pom.xml
+dashboard_local_new.txt
+telegram_config.json
+optimization_audit.txt
+telegram_deployed.txt
+test_login.json
+telegram_local.txt
+telegram_config.json.example
+userscript/MediaChat Bridge UI + Telegram Local Downloader-8.0.user.js
+wiki.zip
+build_log.txt
+plugins/manga-plugin/web/manga/favicon.ico

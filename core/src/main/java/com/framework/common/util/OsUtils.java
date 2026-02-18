@@ -44,7 +44,13 @@ public class OsUtils {
         if (IS_WINDOWS) {
             return new File("tools", "aria2c.exe").getAbsolutePath();
         } else {
-            return "aria2c"; // Auf Linux global installiert erwartet
+            // Check local binary first
+            File localAria = new File("tools", "aria2c");
+            if (localAria.exists()) {
+                makeExecutable(localAria);
+                return localAria.getAbsolutePath();
+            }
+            return "aria2c"; // Fallback to global
         }
     }
 
@@ -79,7 +85,8 @@ public class OsUtils {
      * Setzt das Executable-Bit auf Linux/Unix Systemen.
      */
     public static void makeExecutable(File file) {
-        if (IS_WINDOWS || !file.exists()) return;
+        if (IS_WINDOWS || !file.exists())
+            return;
         if (!file.canExecute()) {
             boolean success = file.setExecutable(true);
             if (!success) {
