@@ -72,7 +72,6 @@ body {
     -webkit-font-smoothing: antialiased;
 }
 
-/* Background subtle gradient */
 body::before {
     content: '';
     position: fixed;
@@ -112,6 +111,11 @@ a:hover {
 
 ::-webkit-scrollbar-thumb:hover {
     background: var(--accent-primary);
+}
+
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--bg-tertiary) var(--bg-secondary);
 }
 
 /* ============================================
@@ -162,6 +166,50 @@ a:hover {
 .navbar-links a.active {
     color: var(--text-primary);
     background: var(--bg-glass);
+}
+
+/* ============================================
+   Login Pillars (New)
+   ============================================ */
+.pillar-container {
+    position: fixed;
+    top: 0;
+    width: 180px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    z-index: -1;
+    opacity: 0.15;
+    will-change: transform;
+}
+
+.pillar-left {
+    left: 5%;
+    animation: scrollDown 60s linear infinite;
+}
+
+.pillar-right {
+    right: 5%;
+    animation: scrollUp 60s linear infinite;
+}
+
+.pillar-panel {
+    width: 100%;
+    height: 260px;
+    background-size: cover;
+    background-position: center;
+    border-radius: 8px;
+    filter: grayscale(80%);
+}
+
+@keyframes scrollDown {
+    from { transform: translate3d(0, -2800px, 0); }
+    to { transform: translate3d(0, 0, 0); }
+}
+
+@keyframes scrollUp {
+    from { transform: translate3d(0, 0, 0); }
+    to { transform: translate3d(0, -2800px, 0); }
 }
 
 /* ============================================
@@ -250,6 +298,16 @@ a:hover {
 .search-provider-select:hover {
     border-color: var(--border-active);
     background: var(--bg-card-hover);
+}
+
+#surprise-btn {
+    white-space: nowrap;
+    animation: sparkle 3s infinite;
+}
+
+@keyframes sparkle {
+    0%, 100% { filter: brightness(1); }
+    50% { filter: brightness(1.3) contrast(1.1); box-shadow: 0 0 10px var(--accent-glow); }
 }
 
 /* ============================================
@@ -962,43 +1020,22 @@ a:hover {
    Animations
    ============================================ */
 @keyframes fadeIn {
-    from {
-        opacity: 0;
-    }
-
-    to {
-        opacity: 1;
-    }
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
 @keyframes slideUp {
-    from {
-        opacity: 0;
-        transform: translateY(20px);
-    }
-
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes slideInRight {
-    from {
-        opacity: 0;
-        transform: translateX(20px);
-    }
-
-    to {
-        opacity: 1;
-        transform: translateX(0);
-    }
+    from { opacity: 0; transform: translateX(20px); }
+    to { opacity: 1; transform: translateX(0); }
 }
 
 @keyframes spin {
-    to {
-        transform: rotate(360deg);
-    }
+    to { transform: rotate(360deg); }
 }
 
 /* Card entrance animation */
@@ -1006,29 +1043,12 @@ a:hover {
     animation: fadeIn 0.4s ease backwards;
 }
 
-.manga-card:nth-child(1) {
-    animation-delay: 0.05s;
-}
-
-.manga-card:nth-child(2) {
-    animation-delay: 0.1s;
-}
-
-.manga-card:nth-child(3) {
-    animation-delay: 0.15s;
-}
-
-.manga-card:nth-child(4) {
-    animation-delay: 0.2s;
-}
-
-.manga-card:nth-child(5) {
-    animation-delay: 0.25s;
-}
-
-.manga-card:nth-child(6) {
-    animation-delay: 0.3s;
-}
+.manga-card:nth-child(1) { animation-delay: 0.05s; }
+.manga-card:nth-child(2) { animation-delay: 0.1s; }
+.manga-card:nth-child(3) { animation-delay: 0.15s; }
+.manga-card:nth-child(4) { animation-delay: 0.2s; }
+.manga-card:nth-child(5) { animation-delay: 0.25s; }
+.manga-card:nth-child(6) { animation-delay: 0.3s; }
 
 /* ============================================
    Responsive
@@ -1039,28 +1059,39 @@ a:hover {
         gap: 0.75rem;
     }
 
-    .navbar {
-        padding: 0.5rem 1rem;
+    .navbar { padding: 0.5rem 1rem; }
+    .modal { width: 95vw; max-height: 90vh; }
+    .modal-header { flex-direction: column; align-items: center; text-align: center; }
+    .reader-sidebar { position: absolute; height: 100vh; }
+    .reader-sidebar:not(.collapsed) { width: 100%; }
+
+    /* Mobile Reader Controls Optimization */
+    .reader-controls {
+        padding: 0.5rem;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        justify-content: space-between;
     }
 
-    .modal {
-        width: 95vw;
-        max-height: 90vh;
-    }
-
-    .modal-header {
-        flex-direction: column;
-        align-items: center;
-        text-align: center;
-    }
-
-    .reader-sidebar {
-        position: absolute;
-        height: 100vh;
-    }
-
-    .reader-sidebar:not(.collapsed) {
+    .reader-controls .page-slider {
+        order: -1;
         width: 100%;
+        max-width: none;
+        margin-bottom: 0.5rem;
+    }
+
+    .reader-controls .page-counter {
+        min-width: 60px;
+        font-size: 0.8rem;
+    }
+
+    .reader-mode-toggle button {
+        padding: 0.4rem 0.6rem;
+        font-size: 0.8rem;
+    }
+
+    #btn-fullscreen {
+        display: none; /* Hide fullscreen on mobile to save space */
     }
 }
 
@@ -1068,8 +1099,5 @@ a:hover {
     .manga-grid {
         grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
     }
-
-    .search-input {
-        font-size: 0.9rem;
-    }
+    .search-input { font-size: 0.9rem; }
 }

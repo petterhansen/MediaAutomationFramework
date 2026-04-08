@@ -81,7 +81,8 @@ public class PipelineManager {
         if (checkId == null)
             checkId = item.getOriginalName();
 
-        if (creator != null && kernel.getHistoryManager().isProcessed(creator, checkId)) {
+        boolean isLocal = Boolean.TRUE.equals(item.getMetadata().get("is_local"));
+        if (!isLocal && creator != null && kernel.getHistoryManager().isProcessed(creator, checkId)) {
             logger.debug("History Skip (Pipeline): {}", checkId);
             return;
         }
@@ -282,6 +283,19 @@ public class PipelineManager {
         }
     }
 
+    // Helper to check if an item is already uploaded, adapting for local files
+    private boolean isItemUploaded(PipelineItem item) {
+        if (Boolean.TRUE.equals(item.getMetadata().get("is_local"))) {
+            String creator = (String) item.getMetadata().get("creator");
+            String fileName = item.getOriginalName();
+            if (item.getProcessedFiles() != null && !item.getProcessedFiles().isEmpty()) {
+                fileName = item.getProcessedFiles().get(0).getName();
+            }
+            return kernel.getDatabaseService().isFileUploaded(creator, fileName);
+        }
+        return kernel.getDatabaseService().isUploaded(item.getSourceUrl());
+    }
+
     // INTELLIGENTER UPLOAD LOOP (Batching)
     private void uploadLoop() {
         while (running.get()) {
@@ -294,6 +308,15 @@ public class PipelineManager {
                 if (first == null)
                     continue;
 
+                // PRE-CHECK FIRST ITEM
+                if (isItemUploaded(first)) {
+                    logger.info("⏩ Skipping already uploaded item: {}", first.getSourceUrl());
+                    if (first.getParentTask() != null) {
+                        first.getParentTask().incrementProcessed();
+                    }
+                    continue;
+                }
+
                 // Batching starten
                 List<PipelineItem> batch = new ArrayList<>();
                 batch.add(first);
@@ -304,7 +327,15 @@ public class PipelineManager {
                     PipelineItem next = ulQueue.peek();
 
                     if (next != null) {
-                        batch.add(ulQueue.poll());
+                        PipelineItem item = ulQueue.poll();
+                        if (isItemUploaded(item)) {
+                            logger.info("⏩ Skipping already uploaded item: {}", item.getSourceUrl());
+                            if (item.getParentTask() != null) {
+                                item.getParentTask().incrementProcessed();
+                            }
+                        } else {
+                            batch.add(item);
+                        }
                         lastAddTime = System.currentTimeMillis();
                     } else {
                         // Queue leer: Prüfen ob in DL/Proc noch was arbeitet

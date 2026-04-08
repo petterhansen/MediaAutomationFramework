@@ -7,7 +7,7 @@ import org.jdbi.v3.core.Jdbi;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
@@ -34,9 +34,26 @@ public class MangaLibrary {
                         )
                     """);
 
-            // 2. Ensure Default Profile
+            // Migration: Add password_hash if it doesn't exist (handle older installations)
+            try {
+                handle.execute("ALTER TABLE manga_profiles ADD COLUMN password_hash TEXT");
+            } catch (Exception ignored) {
+                // Column likely already exists
+            }
+
+            // 1b. Ensure Invites Table Exists
+            handle.execute("""
+                        CREATE TABLE IF NOT EXISTS manga_invites (
+                            code VARCHAR(100) PRIMARY KEY,
+                            max_uses INT DEFAULT 1,
+                            current_uses INT DEFAULT 0,
+                            created_at BIGINT
+                        )
+                    """);
+
+            // 2. Ensure Default Profile (Legacy/Admin)
             handle.execute(
-                    "MERGE INTO manga_profiles (id, name, created_at) KEY (id) VALUES ('default', 'Legacy User', ?)",
+                    "MERGE INTO manga_profiles (id, name, password_hash, created_at) KEY (id) VALUES ('default', 'Legacy User', NULL, ?)",
                     System.currentTimeMillis());
 
             // 3. Ensure Library & Chapters Tables
@@ -84,10 +101,12 @@ public class MangaLibrary {
             // 5. Run Migration DDLs (for legacy tables that already existed)
             try {
                 // Add profile_id column if missing.
-                // Setting DEFAULT 'default' automatically migrates existing rows!
-                // This is safe to run even if column exists (IF NOT EXISTS).
                 handle.execute(
                         "ALTER TABLE manga_progress ADD COLUMN IF NOT EXISTS profile_id VARCHAR(36) NOT NULL DEFAULT 'default'");
+
+                // Add password_hash column to profiles if missing (Migration)
+                handle.execute(
+                        "ALTER TABLE manga_profiles ADD COLUMN IF NOT EXISTS password_hash TEXT");
 
                 // Force update of Primary Key to ensure it matches the new schema.
                 // The previous check using INFORMATION_SCHEMA was unreliable.
@@ -116,7 +135,11 @@ public class MangaLibrary {
                 logger.error("Database migration/verification failed", e);
             }
 
-            handle.execute("CREATE INDEX IF NOT EXISTS idx_manga_lib_id ON manga_library(manga_id, provider)");
+                // Add background_config column to profiles if missing (Migration)
+                handle.execute(
+                        "ALTER TABLE manga_profiles ADD COLUMN IF NOT EXISTS background_config TEXT");
+
+                handle.execute("CREATE INDEX IF NOT EXISTS idx_manga_lib_id ON manga_library(manga_id, provider)");
             handle.execute("CREATE INDEX IF NOT EXISTS idx_manga_ch_id ON manga_chapters(manga_id, provider)");
 
             logger.info("📚 Manga library schema initialized");
@@ -409,13 +432,88 @@ public class MangaLibrary {
 
     // --- Profile Management ---
 
-    public com.plugins.manga.internal.model.MangaProfile createProfile(String name) {
+    public boolean verifyInvite(String code) {
+        if (code == null || code.isBlank()) return false;
+        return jdbi.withHandle(handle -> {
+            Integer current = handle.createQuery("SELECT current_uses FROM manga_invites WHERE code = ?")
+                    .bind(0, code).mapTo(Integer.class).findFirst().orElse(null);
+            Integer max = handle.createQuery("SELECT max_uses FROM manga_invites WHERE code = ?")
+                    .bind(0, code).mapTo(Integer.class).findFirst().orElse(null);
+            
+            if (current != null && max != null && current < max) {
+                handle.execute("UPDATE manga_invites SET current_uses = current_uses + 1 WHERE code = ?", code);
+                return true;
+            }
+            return false;
+        });
+    }
+
+    public void createInvite(String code, int maxUses) {
+        jdbi.useHandle(handle -> {
+            handle.execute("INSERT INTO manga_invites (code, max_uses, current_uses, created_at) VALUES (?, ?, 0, ?)",
+                    code, maxUses, System.currentTimeMillis());
+        });
+    }
+
+    public boolean verifyProfilePassword(String profileId, String password) {
+        return jdbi.withHandle(handle -> {
+            String hash = handle.createQuery("SELECT password_hash FROM manga_profiles WHERE id = ?")
+                    .bind(0, profileId).mapTo(String.class).findFirst().orElse(null);
+            
+            if (hash == null || hash.isBlank()) return true; // Public profile
+            return hash.equals(hashPassword(password));
+        });
+    }
+
+    private String hashPassword(String password) {
+        if (password == null || password.isBlank()) return null;
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] encodedhash = digest.digest(password.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hexString = new StringBuilder(2 * encodedhash.length);
+            for (byte b : encodedhash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
+            }
+            return hexString.toString();
+        } catch (Exception e) {
+            logger.error("Password hashing failed", e);
+            return password; // Fallback to plain (should not happen)
+        }
+    }
+
+    public com.plugins.manga.internal.model.MangaProfile createProfile(String name, String password) {
         String id = java.util.UUID.randomUUID().toString();
         long now = System.currentTimeMillis();
+        String hash = hashPassword(password);
         jdbi.useHandle(handle -> {
-            handle.execute("INSERT INTO manga_profiles (id, name, created_at) VALUES (?, ?, ?)", id, name, now);
+            handle.execute("INSERT INTO manga_profiles (id, name, password_hash, created_at) VALUES (?, ?, ?, ?)", 
+                id, name, hash, now);
         });
-        return new com.plugins.manga.internal.model.MangaProfile(id, name, now);
+        return new com.plugins.manga.internal.model.MangaProfile(id, name, hash, now);
+    }
+
+    public void updateProfilePassword(String profileId, String newPassword) {
+        String hash = hashPassword(newPassword);
+        jdbi.useHandle(handle -> {
+            handle.execute("UPDATE manga_profiles SET password_hash = ? WHERE id = ?", hash, profileId);
+        });
+        logger.info("🔐 Password updated for profile: {}", profileId);
+    }
+
+    public void updateBackgroundConfig(String profileId, String config) {
+        jdbi.useHandle(handle -> {
+            handle.execute("UPDATE manga_profiles SET background_config = ? WHERE id = ?", config, profileId);
+        });
+        logger.info("🎨 Background config updated for profile: {}", profileId);
+    }
+
+    public String getBackgroundConfig(String profileId) {
+        return jdbi.withHandle(handle -> {
+            return handle.createQuery("SELECT background_config FROM manga_profiles WHERE id = ?")
+                    .bind(0, profileId).mapTo(String.class).findFirst().orElse(null);
+        });
     }
 
     public List<com.plugins.manga.internal.model.MangaProfile> getProfiles() {
@@ -424,8 +522,22 @@ public class MangaLibrary {
                     .map((rs, ctx) -> new com.plugins.manga.internal.model.MangaProfile(
                             rs.getString("id"),
                             rs.getString("name"),
+                            rs.getString("password_hash"),
                             rs.getLong("created_at")))
                     .list();
+        });
+    }
+
+    public com.plugins.manga.internal.model.MangaProfile getProfileByName(String name) {
+        return jdbi.withHandle(handle -> {
+            return handle.createQuery("SELECT * FROM manga_profiles WHERE name = ?")
+                    .bind(0, name)
+                    .map((rs, ctx) -> new com.plugins.manga.internal.model.MangaProfile(
+                            rs.getString("id"),
+                            rs.getString("name"),
+                            rs.getString("password_hash"),
+                            rs.getLong("created_at")))
+                    .findFirst().orElse(null);
         });
     }
 }

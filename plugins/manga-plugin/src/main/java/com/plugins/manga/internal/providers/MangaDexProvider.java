@@ -30,6 +30,7 @@ public class MangaDexProvider implements MangaProvider {
     private static final String COVER_BASE = "https://uploads.mangadex.org/covers";
     private static final String USER_AGENT = "MediaAutomationFramework/1.0 MangaPlugin";
     private final Gson gson = new Gson();
+    private java.util.Map<String, String> tagCache = null;
 
     @Override
     public String getName() {
@@ -39,6 +40,112 @@ public class MangaDexProvider implements MangaProvider {
     @Override
     public String getDisplayName() {
         return "MangaDex";
+    }
+
+    @Override
+    public List<String> getGenres() {
+        if (tagCache == null) {
+            fetchTags();
+        }
+        if (tagCache == null) return Collections.emptyList();
+        List<String> genres = new ArrayList<>(tagCache.keySet());
+        Collections.sort(genres);
+        return genres;
+    }
+
+    @Override
+    public List<MangaInfo> getByGenre(String genre, int limit, int page, String sort) {
+        if (tagCache == null) {
+            fetchTags();
+        }
+        if (tagCache == null) return Collections.emptyList();
+        
+        String tagId = tagCache.get(genre);
+        if (tagId == null) return Collections.emptyList();
+
+        try {
+            int offset = (page - 1) * limit;
+            StringBuilder urlBuilder = new StringBuilder(BASE_URL)
+                .append("/manga?limit=").append(Math.min(limit, 50))
+                .append("&offset=").append(offset)
+                .append("&includedTags[]=").append(tagId)
+                .append("&includes[]=cover_art&includes[]=author")
+                .append("&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica");
+
+            // Apply sorting
+            if ("name".equalsIgnoreCase(sort)) {
+                urlBuilder.append("&order[title]=asc");
+            } else if ("popular".equalsIgnoreCase(sort)) {
+                urlBuilder.append("&order[followedCount]=desc");
+            } else if ("latest".equalsIgnoreCase(sort)) {
+                urlBuilder.append("&order[latestUploadedChapter]=desc");
+            } else {
+                // Default to popularity for discovery
+                urlBuilder.append("&order[followedCount]=desc");
+            }
+
+            String url = urlBuilder.toString();
+            JsonObject response = getJson(url);
+            if (response == null) return Collections.emptyList();
+
+            JsonArray data = response.getAsJsonArray("data");
+            List<MangaInfo> results = new ArrayList<>();
+            for (JsonElement el : data) {
+                MangaInfo info = parseMangaInfo(el.getAsJsonObject());
+                if (info != null) results.add(info);
+            }
+            return results;
+        } catch (Exception e) {
+            logger.error("MangaDex getByGenre failed for: {} (page {})", genre, page, e);
+            return Collections.emptyList();
+        }
+    }
+
+    private void fetchTags() {
+        try {
+            JsonObject response = getJson(BASE_URL + "/manga/tag");
+            if (response == null) return;
+
+            java.util.Map<String, String> newCache = new java.util.HashMap<>();
+            JsonArray data = response.getAsJsonArray("data");
+            for (JsonElement el : data) {
+                JsonObject tag = el.getAsJsonObject();
+                JsonObject attrs = tag.getAsJsonObject("attributes");
+                if ("genre".equals(attrs.get("group").getAsString())) {
+                    JsonObject nameObj = attrs.getAsJsonObject("name");
+                    if (nameObj.has("en")) {
+                        newCache.put(nameObj.get("en").getAsString(), tag.get("id").getAsString());
+                    }
+                }
+            }
+            tagCache = newCache;
+        } catch (Exception e) {
+            logger.error("Failed to fetch MangaDex tags", e);
+        }
+    }
+
+    @Override
+    public List<MangaInfo> getPopular(int limit) {
+        try {
+            // Popular = Most followed manga on MangaDex
+            String url = BASE_URL + "/manga?limit=" + Math.min(limit, 50)
+                    + "&includes[]=cover_art&includes[]=author"
+                    + "&order[followedCount]=desc"
+                    + "&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica";
+
+            JsonObject response = getJson(url);
+            if (response == null) return Collections.emptyList();
+
+            JsonArray data = response.getAsJsonArray("data");
+            List<MangaInfo> results = new ArrayList<>();
+            for (JsonElement el : data) {
+                results.add(parseMangaInfo(el.getAsJsonObject()));
+            }
+            return results;
+        } catch (Exception e) {
+            logger.error("MangaDex getPopular failed", e);
+            return Collections.emptyList();
+        }
     }
 
     @Override

@@ -1,7 +1,10 @@
 package com.plugins.socials;
 
 import com.framework.api.MediaPlugin;
+import com.framework.api.DownloadSourceProvider;
+import com.framework.common.DownloadRequest;
 import com.framework.core.Kernel;
+import com.framework.core.queue.QueueTask;
 import com.framework.core.pipeline.StageHandler;
 import com.plugins.socials.internal.SocialsSource;
 import org.slf4j.Logger;
@@ -12,7 +15,7 @@ import java.io.File;
 /**
  * Socials Plugin - Downloads media from Instagram, Facebook, Threads, Twitter, Reddit, Pinterest
  */
-public class SocialsPlugin implements MediaPlugin {
+public class SocialsPlugin implements MediaPlugin, DownloadSourceProvider {
     private static final Logger logger = LoggerFactory.getLogger(SocialsPlugin.class);
     private Kernel kernel;
     private SocialsSource source;
@@ -20,7 +23,7 @@ public class SocialsPlugin implements MediaPlugin {
 
     @Override
     public String getName() {
-        return "Socials";
+        return "socials";
     }
 
     @Override
@@ -39,6 +42,9 @@ public class SocialsPlugin implements MediaPlugin {
 
         this.source = new SocialsSource(kernel, ytDlpPath);
         kernel.getQueueManager().registerExecutor("socials_dl", source);
+
+        // Register as a DownloadSourceProvider
+        kernel.getSourceDetectionService().registerProvider(this);
 
         // Register Pipeline Download Handler for socials_dl=true
         kernel.getPipelineManager().registerDownloadHandler(new StageHandler<>() {
@@ -63,33 +69,73 @@ public class SocialsPlugin implements MediaPlugin {
 
     @Override
     public void onDisable() {
+        if (kernel != null) {
+            kernel.getSourceDetectionService().unregisterProvider(this);
+        }
         logger.info("Socials Plugin disabled");
     }
 
+    // --- DownloadSourceProvider Implementation ---
+
+    @Override
+    public boolean canHandle(String query) {
+        if (query == null) return false;
+        String q = query.toLowerCase();
+        return q.contains("instagram.com") ||
+               q.contains("facebook.com") || q.contains("fb.watch") ||
+               q.contains("threads.net") ||
+               q.contains("twitter.com") || q.contains("x.com") ||
+               q.contains("reddit.com") || q.contains("redd.it") ||
+               q.contains("pinterest.com") || q.contains("pin.it");
+    }
+
+    @Override
+    public QueueTask createTask(DownloadRequest req, long chatId, Integer threadId) {
+        QueueTask task = new QueueTask("socials_dl");
+        task.addParameter("query", req.query());
+        int amount = req.amount() > 0 ? req.amount() : 1;
+        task.addParameter("amount", amount);
+        
+        if (req.filetype() != null) {
+            task.addParameter("filetype", req.filetype());
+        }
+
+        if (chatId != 0) {
+            task.addParameter("initiatorChatId", String.valueOf(chatId));
+            if (threadId != null) {
+                task.addParameter("initiatorThreadId", String.valueOf(threadId));
+            }
+        }
+
+        return task;
+    }
+
     private boolean checkYtDlpInstalled() {
-        // Priority 1: Check if yt-dlp is in system PATH (e.g. installed via pip)
+        // Priority 1: Check local binary paths (including Linux Venv)
+        File[] localPaths = {
+            new File("tools/yt-dlp.exe"),
+            new File("tools/yt-dlp"),
+            new File("tools/venv/bin/yt-dlp")
+        };
+
+        for (File path : localPaths) {
+            if (path.exists()) {
+                ytDlpPath = path.getAbsolutePath();
+                logger.info("🎯 Found yt-dlp binary: {}", ytDlpPath);
+                return true;
+            }
+        }
+
+        // Priority 2: Check system PATH
         try {
             Process process = new ProcessBuilder("yt-dlp", "--version").start();
             if (process.waitFor() == 0) {
                 ytDlpPath = "yt-dlp";
+                logger.info("🎯 Found yt-dlp in system PATH");
                 return true;
             }
         } catch (Exception e) {}
 
-        // Priority 2: Check tools/yt-dlp.exe (local standalone or shim)
-        File localYtDlp = new File("tools/yt-dlp.exe");
-        if (localYtDlp.exists()) {
-            ytDlpPath = localYtDlp.getAbsolutePath();
-            return true;
-        }
-        
-        // Priority 3: Check tools/yt-dlp (linux/mac)
-        localYtDlp = new File("tools/yt-dlp");
-        if (localYtDlp.exists()) {
-            ytDlpPath = localYtDlp.getAbsolutePath();
-            return true;
-        }
-        
         return false;
     }
 }

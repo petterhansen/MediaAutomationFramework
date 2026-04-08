@@ -63,8 +63,10 @@ public class TelegramUploader {
                     obj.addProperty("caption", caption);
                 }
 
-                if (item.isVideo() && item.thumbnail() != null) {
-                    obj.addProperty("thumbnail", "attach://thumb" + i);
+                if (item.isVideo()) {
+                    if (item.thumbnail() != null) {
+                        obj.addProperty("thumbnail", "attach://thumb" + i);
+                    }
                     if (item.width() > 0)
                         obj.addProperty("width", item.width());
                     if (item.height() > 0)
@@ -166,7 +168,7 @@ public class TelegramUploader {
             // 6. Thumbnail
             if (thumbnail != null && thumbnail.exists()) {
                 logger.debug("📤 Attaching thumbnail stream...");
-                attachFile(writer, output, boundary, "thumb", thumbnail);
+                attachFile(writer, output, boundary, "thumbnail", thumbnail);
             }
 
             writer.append("--").append(boundary).append("--\r\n").flush();
@@ -217,7 +219,7 @@ public class TelegramUploader {
 
             if (thumbnail != null && thumbnail.exists()) {
                 logger.debug("📤 Attaching thumbnail stream...");
-                attachFile(writer, output, boundary, "thumb", thumbnail);
+                attachFile(writer, output, boundary, "thumbnail", thumbnail);
             }
 
             writer.append("--").append(boundary).append("--\r\n").flush();

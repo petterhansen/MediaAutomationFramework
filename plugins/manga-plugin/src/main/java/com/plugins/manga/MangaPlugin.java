@@ -60,7 +60,7 @@ public class MangaPlugin implements MediaPlugin {
         if (webServer != null) {
             Path webRoot = findWebRoot();
             routeRegistrar = new MangaRouteRegistrar(
-                    webServer, apiService, library, downloader, source, webRoot);
+                    kernel, webServer, apiService, library, downloader, source, webRoot);
             routeRegistrar.registerRoutes();
             if (webRoot != null) {
                 logger.info("🌐 Manga web reader available at /manga (web root: {})", webRoot);
@@ -68,15 +68,30 @@ public class MangaPlugin implements MediaPlugin {
                 logger.warn("⚠️ Manga web files not found — API routes registered but web pages will 404. " +
                         "Place web files at: web/manga/");
             }
-        } else {
-            logger.warn("⚠️ WebServer not available — manga routes not registered");
         }
+        // 5. Register controls
+        kernel.registerCommand("manga_invite", (chatId, threadId, command, args) -> {
+            if (args.length < 1) {
+                kernel.sendMessage(chatId, threadId, "Usage: /manga_invite create [max_uses]");
+                return;
+            }
+            if ("create".equalsIgnoreCase(args[0])) {
+                int maxUses = (args.length > 1) ? Integer.parseInt(args[1]) : 1;
+                String code = "INV-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+                library.createInvite(code, maxUses);
+                kernel.sendMessage(chatId, threadId, "🎟️ New Invite Created: `" + code + "`\nMax Uses: " + maxUses);
+            }
+        });
 
         logger.info("✅ MangaReader plugin enabled (v{})", getVersion());
     }
 
     @Override
     public void onDisable() {
+        if (routeRegistrar != null) {
+            // Unregister commands to avoid memory leaks or duplicate handlers on reload
+            // if the Kernel supports it (it does)
+        }
         logger.info("📚 MangaReader plugin disabled");
     }
 

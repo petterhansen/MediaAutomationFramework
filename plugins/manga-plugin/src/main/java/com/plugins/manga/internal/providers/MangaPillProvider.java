@@ -44,48 +44,52 @@ public class MangaPillProvider implements MangaProvider {
             Document doc = fetchDocument(url);
             if (doc == null) return Collections.emptyList();
 
-            List<MangaInfo> results = new ArrayList<>();
-            Elements mangaCards = doc.select("div.my-3.justify-end > div");
-
-            for (Element card : mangaCards) {
-                if (results.size() >= limit) break;
-                try {
-                    Element link = card.selectFirst("a[href*=/manga/]");
-                    if (link == null) continue;
-
-                    String href = link.attr("href");
-                    String mangaId = extractMangaId(href);
-                    if (mangaId == null) continue;
-
-                    // Cover image
-                    Element img = card.selectFirst("img");
-                    String coverUrl = img != null ? img.attr("src") : null;
-
-                    // Title
-                    Element titleEl = card.selectFirst("a.mt-3, div.mt-3 a, a[href*=/manga/] + div a, a.font-black");
-                    String title = "Unknown";
-                    if (titleEl != null) {
-                        title = titleEl.text().trim();
-                    } else if (link.text() != null && !link.text().isBlank()) {
-                        title = link.text().trim();
-                    }
-
-                    // Fallback: use img alt
-                    if ("Unknown".equals(title) && img != null && img.hasAttr("alt")) {
-                        title = img.attr("alt").trim();
-                    }
-
-                    results.add(new MangaInfo(
-                            mangaId, title, "", coverUrl, "", List.of(), getName()
-                    ));
-                } catch (Exception e) {
-                    logger.debug("Error parsing manga card", e);
-                }
-            }
-
-            return results;
+            return parseMangaGrid(doc, limit);
         } catch (Exception e) {
             logger.error("MangaPill search failed for: {}", query, e);
+            return Collections.emptyList();
+        }
+    }
+
+    @Override
+    public List<String> getGenres() {
+        try {
+            Document doc = fetchDocument(BASE_URL + "/search");
+            if (doc == null) return Collections.emptyList();
+
+            List<String> genres = new ArrayList<>();
+            Elements genreLinks = doc.select("a[href*='genre=']");
+            for (Element link : genreLinks) {
+                String genre = link.text().trim();
+                if (!genre.isEmpty() && !genres.contains(genre)) {
+                    genres.add(genre);
+                }
+            }
+            
+            if (genres.isEmpty()) {
+                return List.of("Action", "Adventure", "Comedy", "Drama", "Fantasy", "Horror", "Mystery", "Psychological", "Romance", "Sci-fi", "Seinen", "Shoujo", "Shounen", "Slice of Life", "Sports", "Supernatural", "Thriller", "Tragedy");
+            }
+
+            Collections.sort(genres);
+            return genres;
+        } catch (Exception e) {
+            logger.error("MangaPill getGenres failed", e);
+            return Collections.emptyList();
+        }
+    }
+
+    @Override
+    public List<MangaInfo> getByGenre(String genre, int limit, int page) {
+        try {
+            String url = BASE_URL + "/search?genre=" + java.net.URLEncoder.encode(genre, java.nio.charset.StandardCharsets.UTF_8);
+            if (page > 1) {
+                url += "&page=" + page;
+            }
+            Document doc = fetchDocument(url);
+            if (doc == null) return Collections.emptyList();
+            return parseMangaGrid(doc, limit);
+        } catch (Exception e) {
+            logger.error("MangaPill getByGenre failed for: {} (page {})", genre, page, e);
             return Collections.emptyList();
         }
     }
@@ -102,8 +106,11 @@ public class MangaPillProvider implements MangaProvider {
             String title = titleEl != null ? titleEl.text().trim() : "Unknown";
 
             // Cover
-            Element coverImg = doc.selectFirst("img[src*=cover], div.relative img");
-            String coverUrl = coverImg != null ? coverImg.attr("src") : null;
+            Element coverImg = doc.selectFirst("img[data-src*=mangapill], img[src*=mangapill], div.relative img, img.object-cover");
+            String coverUrl = null;
+            if (coverImg != null) {
+                coverUrl = coverImg.hasAttr("data-src") ? coverImg.attr("data-src") : coverImg.attr("src");
+            }
 
             // Description
             Element descEl = doc.selectFirst("p.text-sm.text--secondary, div.my-3 p");
@@ -159,6 +166,119 @@ public class MangaPillProvider implements MangaProvider {
             return null;
         }
     }
+    @Override
+    public List<MangaInfo> getPopular(int limit) {
+        Document doc = fetchDocument(BASE_URL);
+        if (doc == null) return Collections.emptyList();
+
+        // Target the "Trending Mangas" section precisely
+        Element trendingHeader = null;
+        Elements headers = doc.select("h1, h2, h3, h4");
+        for (Element h : headers) {
+            if (h.text().toLowerCase().contains("trending mang")) {
+                trendingHeader = h;
+                break;
+            }
+        }
+
+        if (trendingHeader != null) {
+            // Usually the header is in a flex container with "Surprise Me" button
+            // The grid is the NEXT sibling of that container.
+            Element container = trendingHeader.parent();
+            Element grid = container.nextElementSibling();
+            
+            // Skip potential ads or non-div siblings
+            while (grid != null && (!grid.tagName().equals("div") || (!grid.hasClass("grid") && grid.selectFirst("div.grid") == null))) {
+                grid = grid.nextElementSibling();
+            }
+
+            if (grid != null) {
+                // If the grid is a descendant of the container
+                if (!grid.hasClass("grid")) {
+                    grid = grid.selectFirst("div.grid");
+                }
+                if (grid != null) {
+                    return parseSpecificGrid(grid, limit);
+                }
+            }
+        }
+
+        // Fallback: parse regular grids but prioritize first
+        return parseMangaGrid(doc, limit);
+    }
+
+    private List<MangaInfo> parseSpecificGrid(Element grid, int limit) {
+        List<MangaInfo> results = new ArrayList<>();
+        Elements cards = grid.children();
+        for (Element card : cards) {
+            if (results.size() >= limit) break;
+            
+            // Exclude chapter-specific updates
+            boolean isChapterCard = card.selectFirst("a[href^=/chapters/]") != null;
+            if (isChapterCard) continue;
+
+            MangaInfo info = parseCard(card);
+            if (info != null) results.add(info);
+        }
+        return results;
+    }
+
+    private MangaInfo parseCard(Element card) {
+        try {
+            // Find the link that points to the manga page
+            Element titleLink = card.selectFirst("a[href^=/manga/]");
+            if (titleLink == null) return null;
+
+            String href = titleLink.attr("href");
+            String mangaId = extractMangaId(href);
+            if (mangaId == null) return null;
+
+            Element img = card.selectFirst("img");
+            String coverUrl = null;
+            if (img != null) {
+                coverUrl = img.hasAttr("data-src") ? img.attr("data-src") : img.attr("src");
+            }
+
+            // Title is usually inside a div within an <a> tag, or directly in an <a> tag
+            // We look at ALL links in the card to find one with text
+            String title = "";
+            Elements allLinks = card.select("a[href^=/manga/]");
+            for (Element link : allLinks) {
+                // Try to find a nested div with text first
+                Element div = link.selectFirst("div");
+                if (div != null && !div.text().trim().isEmpty()) {
+                    title = div.text().trim();
+                    break;
+                }
+                // Try the link text itself
+                if (!link.text().trim().isEmpty()) {
+                    title = link.text().trim();
+                    break;
+                }
+            }
+
+            // Fallback for different structures
+            if (title.isEmpty()) {
+                Element titleEl = card.selectFirst("a.mb-2, a.font-bold, div.font-bold, h4, h5");
+                if (titleEl != null) title = titleEl.text().trim();
+            }
+
+            List<String> tags = new ArrayList<>();
+            // Metadata like Year, Status, etc.
+            Elements metaEls = card.select("div.text-xs, div.text-muted, div.flex.flex-wrap div");
+            for (Element meta : metaEls) {
+                String t = meta.text().trim();
+                if (!t.isEmpty() && !t.startsWith("#") && t.length() < 30) {
+                    tags.add(t);
+                }
+            }
+
+            return new MangaInfo(mangaId, title, "", coverUrl, "", tags, getName());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
 
     @Override
     public List<String> getChapterPages(String chapterId) {
@@ -192,6 +312,92 @@ public class MangaPillProvider implements MangaProvider {
         }
     }
 
+    @Override
+    public MangaInfo getRandom() {
+        try {
+            // MangaPill /random redirects to a random manga page
+            String url = BASE_URL + "/mangas/random";
+            // We need to follow redirects manually or use a connection that does
+            org.jsoup.Connection.Response response = Jsoup.connect(url)
+                    .userAgent(USER_AGENT)
+                    .header("Referer", BASE_URL)
+                    .followRedirects(true)
+                    .execute();
+            
+            Document doc = response.parse();
+            String finalUrl = response.url().toString();
+            String mangaId = extractMangaId(finalUrl);
+            
+            if (mangaId != null) {
+                // Now parse the details page we landed on
+                Element titleEl = doc.selectFirst("h1");
+                String title = titleEl != null ? titleEl.text().trim() : "Unknown";
+                
+                Element coverImg = doc.selectFirst("img[data-src*=mangapill], img[src*=mangapill], div.relative img, img.object-cover");
+                String coverUrl = null;
+                if (coverImg != null) {
+                    coverUrl = coverImg.hasAttr("data-src") ? coverImg.attr("data-src") : coverImg.attr("src");
+                }
+                
+                return new MangaInfo(mangaId, title, "", coverUrl, "", List.of(), getName());
+            }
+        } catch (Exception e) {
+            logger.error("MangaPill getRandom failed", e);
+        }
+        return null;
+    }
+
+    private List<MangaInfo> parseMangaGrid(Document doc, int limit) {
+        List<MangaInfo> results = new ArrayList<>();
+        Elements grids = doc.select("div.grid");
+
+        for (Element grid : grids) {
+            Elements cards = grid.children();
+            for (Element card : cards) {
+                if (results.size() >= limit) break;
+                try {
+                    // A valid manga card has a link to /manga/
+                    Element titleLink = card.selectFirst("a.mb-2, a[href^=/manga/]");
+                    if (titleLink == null) continue;
+
+                    String href = titleLink.attr("href");
+                    String mangaId = extractMangaId(href);
+                    if (mangaId == null) continue;
+
+                    // Cover
+                    Element img = card.selectFirst("a.relative.block img, img");
+                    String coverUrl = null;
+                    if (img != null) {
+                        coverUrl = img.hasAttr("data-src") ? img.attr("data-src") : img.attr("src");
+                    }
+
+                    // Title
+                    Element titleEl = titleLink.selectFirst("div");
+                    String title = (titleEl != null) ? titleEl.text().trim() : titleLink.text().trim();
+                    if (title.isEmpty() || title.equalsIgnoreCase("Unknown")) {
+                        if (img != null && img.hasAttr("alt")) title = img.attr("alt").trim();
+                    }
+
+                    // Tags
+                    List<String> tags = new ArrayList<>();
+                    Elements tagEls = card.select("div.flex.flex-wrap.gap-1 div");
+                    for (Element tag : tagEls) {
+                        String t = tag.text().trim();
+                        if (!t.isEmpty()) tags.add(t);
+                    }
+
+                    results.add(new MangaInfo(
+                            mangaId, title, "", coverUrl, "", tags, getName()
+                    ));
+                } catch (Exception e) {
+                    logger.debug("Error parsing manga card", e);
+                }
+            }
+            if (results.size() >= limit) break;
+        }
+        return results;
+    }
+
     // --- Helpers ---
 
     private Document fetchDocument(String url) {
@@ -206,6 +412,7 @@ public class MangaPillProvider implements MangaProvider {
             return null;
         }
     }
+
 
     private String extractMangaId(String href) {
         // Extract numeric ID from paths like /manga/12345/manga-title

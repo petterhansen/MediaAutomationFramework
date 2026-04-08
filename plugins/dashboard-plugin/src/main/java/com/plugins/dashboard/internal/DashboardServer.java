@@ -85,6 +85,7 @@ public class DashboardServer implements com.framework.api.WebServer {
             createAuthorizedContext("/statistics", new HtmlHandler("web/statistics.html"), Role.ADMIN);
             createAuthorizedContext("/database", new HtmlHandler("web/database.html"), Role.ADMIN);
             createAuthorizedContext("/viewer", new HtmlHandler("web/viewer.html"), Role.ANY);
+            createAuthorizedContext("/browser", new HtmlHandler("web/browser.html"), Role.ANY);
 
             // --- Database API ---
             createAuthorizedContext("/api/database/tables", new DatabaseApiHandler(), Role.ADMIN);
@@ -118,6 +119,7 @@ public class DashboardServer implements com.framework.api.WebServer {
             createAuthorizedContext("/api/command", new CommandApiHandler(), Role.ADMIN);
             createAuthorizedContext("/push", new PushHandler(), Role.ADMIN);
             createAuthorizedContext("/api/torrent", new TorrentPushHandler(), Role.ADMIN);
+            createAuthorizedContext("/api/proxy", new ProxyHandler(), Role.ANY);
 
             // --- Streaming & Files ---
             createAuthorizedContext("/media/file", new MediaFileHandler(), Role.ANY);
@@ -258,8 +260,6 @@ public class DashboardServer implements com.framework.api.WebServer {
         // Whitelist for paths that MUST be public even if accidentally wrapped
         private static final Set<String> WHITELIST = Set.of(
                 "/login", "/api/login", "/auth.html", "/403.html", "/404.html",
-                // Allowed for client-side auth handling (Navigation fix)
-                "/status", "/viewer", "/media", "/members", "/commands", "/settings", "/statistics", "/database",
                 "/manga", "/manga/", "/manga/css", "/manga/js");
 
         public AuthWrapper(HttpHandler inner) {
@@ -299,6 +299,23 @@ public class DashboardServer implements com.framework.api.WebServer {
             if (token == null && !apiKeyAuth) {
                 // Try from query for downloads/previews
                 token = parseQuery(ex.getRequestURI().getQuery()).get("token");
+            }
+
+            // Try from Cookie
+            if (token == null && !apiKeyAuth) {
+                List<String> cookies = ex.getRequestHeaders().get("Cookie");
+                if (cookies != null) {
+                    for (String cookieHeader : cookies) {
+                        String[] parts = cookieHeader.split(";");
+                        for (String part : parts) {
+                            part = part.trim();
+                            if (part.startsWith("maf_token=")) {
+                                token = part.substring("maf_token=".length());
+                                break;
+                            }
+                        }
+                    }
+                }
             }
 
             // 1. Check if token is valid at all
@@ -569,14 +586,25 @@ public class DashboardServer implements com.framework.api.WebServer {
         public void handle(HttpExchange ex) throws IOException {
             try (InputStreamReader isr = new InputStreamReader(ex.getRequestBody(), StandardCharsets.UTF_8)) {
                 JsonObject json = gson.fromJson(isr, JsonObject.class);
-                QueueTask task = new QueueTask("BROWSER_BATCH");
 
                 List<String> urls = new ArrayList<>();
+                List<String> filenames = new ArrayList<>(); // Parallel list for filenames
                 if (json.has("urls")) {
-                    for (JsonElement e : json.getAsJsonArray("urls"))
-                        urls.add(e.getAsString());
+                    for (JsonElement e : json.getAsJsonArray("urls")) {
+                        if (e.isJsonObject()) {
+                            // Object format: {url: "...", name: "..."}
+                            JsonObject obj = e.getAsJsonObject();
+                            urls.add(obj.get("url").getAsString());
+                            filenames.add(obj.has("name") ? obj.get("name").getAsString() : null);
+                        } else {
+                            // Plain string format
+                            urls.add(e.getAsString());
+                            filenames.add(null);
+                        }
+                    }
                 } else if (json.has("url")) {
                     urls.add(json.get("url").getAsString());
+                    filenames.add(null);
                 }
 
                 if (urls.isEmpty()) {
@@ -584,18 +612,145 @@ public class DashboardServer implements com.framework.api.WebServer {
                     return;
                 }
 
-                task.addParameter("urls", urls);
-                task.addParameter("folder", json.has("folder") ? json.get("folder").getAsString() : "BrowserDump");
-                if (json.has("cookies"))
-                    task.addParameter("cookies", json.get("cookies").getAsString());
-                if (json.has("referer"))
-                    task.addParameter("referer", json.get("referer").getAsString());
+                int queuedCount = 0;
+                for (int i = 0; i < urls.size(); i++) {
+                    String url = urls.get(i);
+                    String filename = filenames.get(i);
+                    String folder = json.has("folder") ? json.get("folder").getAsString() : null;
 
-                kernel.getQueueManager().addTask(task);
-                sendJson(ex, Map.of("status", "ok", "count", urls.size()));
+                    com.framework.common.DownloadRequest req = new com.framework.common.DownloadRequest(1, null, url, null, null, folder);
+                    QueueTask task = kernel.getSourceDetectionService().createTask(req, 0, null);
+
+                    if (task != null) {
+                        task.addParameter("folder", json.has("folder") ? json.get("folder").getAsString() : "BrowserDump");
+                        if (filename != null) {
+                            task.addParameter("filenames", List.of(filename));
+                        }
+                        if (json.has("cookies"))
+                            task.addParameter("cookies", json.get("cookies").getAsString());
+                        if (json.has("referer"))
+                            task.addParameter("referer", json.get("referer").getAsString());
+
+                        kernel.getQueueManager().addTask(task);
+                        queuedCount++;
+                    } else {
+                        logger.warn("No suitable SourceProvider found for: {}", url);
+                    }
+                }
+
+                sendJson(ex, Map.of("status", "ok", "count", queuedCount));
             } catch (Exception e) {
                 logger.error("Push Error", e);
                 sendError(ex, 500, "Internal Error");
+            }
+        }
+    }
+
+    private class ProxyHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            try {
+                String query = ex.getRequestURI().getRawQuery();
+                if (query == null) {
+                    sendError(ex, 400, "Missing parameters");
+                    return;
+                }
+                
+                String targetUrl = null;
+                String cookies = null;
+                
+                String[] pairs = query.split("&");
+                for (String pair : pairs) {
+                    int idx = pair.indexOf("=");
+                    if (idx > 0) {
+                        String key = URLDecoder.decode(pair.substring(0, idx), StandardCharsets.UTF_8);
+                        String value = URLDecoder.decode(pair.substring(idx + 1), StandardCharsets.UTF_8);
+                        if ("url".equals(key)) {
+                            targetUrl = value;
+                        } else if ("cookies".equals(key)) {
+                            cookies = value;
+                        }
+                    }
+                }
+                
+                if (targetUrl == null) {
+                    sendError(ex, 400, "Missing 'url' parameter");
+                    return;
+                }
+                
+                // Very basic security check to prevent loopbacks
+                if (targetUrl.contains("localhost") || targetUrl.contains("127.0.0.1") || targetUrl.startsWith("file://")) {
+                    sendError(ex, 403, "Forbidden target URL");
+                    return;
+                }
+
+                java.net.URL url = java.net.URI.create(targetUrl).toURL();
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                
+                String userAgent = ex.getRequestHeaders().getFirst("User-Agent");
+                if (userAgent == null || userAgent.isEmpty()) {
+                    userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+                }
+                conn.setRequestProperty("User-Agent", userAgent);
+                
+                // Allow custom cookies for Cloudflare / Auth bypass
+                if (cookies != null && !cookies.isEmpty()) {
+                    conn.setRequestProperty("Cookie", cookies);
+                }
+                
+                int responseCode = conn.getResponseCode();
+                if (responseCode >= 400) {
+                    sendError(ex, responseCode, "Target returned error: " + responseCode);
+                    return;
+                }
+
+                String contentType = conn.getContentType();
+                if (contentType == null) contentType = "text/html";
+
+                if (contentType.toLowerCase().contains("text/html")) {
+                    // It's a web page, sanitize it!
+                    try (Reader reader = new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)) {
+                        StringBuilder sb = new StringBuilder();
+                        char[] buf = new char[8192];
+                        int n;
+                        while ((n = reader.read(buf)) != -1) {
+                            sb.append(buf, 0, n);
+                        }
+                        
+                        String cleanHtml = AdBlocker.sanitizeHtml(sb.toString(), targetUrl, cookies);
+                        
+                        byte[] output = cleanHtml.getBytes(StandardCharsets.UTF_8);
+                        ex.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
+                        ex.sendResponseHeaders(200, output.length);
+                        try (OutputStream os = ex.getResponseBody()) {
+                            os.write(output);
+                        }
+                    }
+                } else {
+                    // Not HTML (e.g., image, js, css) - Stream it directly
+                    ex.getResponseHeaders().set("Content-Type", contentType);
+                    long len = conn.getContentLengthLong();
+                    ex.sendResponseHeaders(200, len > 0 ? len : 0);
+                    
+                    try (InputStream is = conn.getInputStream(); OutputStream os = ex.getResponseBody()) {
+                        byte[] buf = new byte[8192];
+                        int count;
+                        while ((count = is.read(buf)) != -1) {
+                            os.write(buf, 0, count);
+                        }
+                    }
+                }
+
+            } catch (IOException e) {
+                if (e.getMessage() != null && e.getMessage().toLowerCase().contains("broken pipe")) {
+                    logger.debug("Proxy client disconnected (broken pipe)");
+                } else {
+                    logger.error("Proxy IO error", e);
+                }
+            } catch (Exception e) {
+                logger.error("Proxy error", e);
+                sendError(ex, 500, "Proxy error: " + e.getMessage());
             }
         }
     }
@@ -864,15 +1019,24 @@ public class DashboardServer implements com.framework.api.WebServer {
             String method = ex.getRequestMethod();
 
             if (method.equalsIgnoreCase("GET")) {
-                if ("list".equals(action))
-                    sendJson(ex, scanDir(new File("media_cache")));
-                else if ("delete".equals(action))
+                if ("list".equals(action)) {
+                    File baseDir = new File("media_cache").getCanonicalFile();
+                    String reqPath = params.getOrDefault("path", "");
+                    File targetDir = reqPath.isEmpty() ? baseDir : new File(baseDir, reqPath).getCanonicalFile();
+                    if (!isWithinDirectory(targetDir, baseDir) || !targetDir.isDirectory()) {
+                        sendJson(ex, new JsonArray());
+                    } else {
+                        sendJson(ex, scanDir(baseDir, targetDir));
+                    }
+                } else if ("delete".equals(action))
                     sendJson(ex, Map.of("success", deleteItem(params.get("path"))));
                 else if ("rename".equals(action))
                     sendJson(ex, Map.of("success", renameItem(params.get("path"), params.get("newName"))));
-                else if ("mkdir".equals(action))
-                    sendJson(ex, Map.of("success", new File("media_cache", params.get("name")).mkdirs()));
-                else if ("read_text".equals(action))
+                else if ("mkdir".equals(action)) {
+                    File baseDir = new File("media_cache").getCanonicalFile();
+                    File d = new File(baseDir, params.get("name")).getCanonicalFile();
+                    sendJson(ex, Map.of("success", isWithinDirectory(d, baseDir) && d.mkdirs()));
+                } else if ("read_text".equals(action))
                     handleReadText(ex, params.get("path"));
                 else if ("share".equals(action))
                     handleShare(ex, params.get("path"));
@@ -882,6 +1046,19 @@ public class DashboardServer implements com.framework.api.WebServer {
                     handlePack(ex, params);
                 else if ("unpack".equals(action))
                     handleUnpack(ex, params);
+                else if ("metadata".equals(action))
+                    handleMetadata(ex, params.get("path"));
+                else if ("search".equals(action)) {
+                    File baseDir = new File("media_cache").getCanonicalFile();
+                    String reqPath = params.getOrDefault("path", "");
+                    String query = params.getOrDefault("query", "").toLowerCase();
+                    File targetDir = reqPath.isEmpty() ? baseDir : new File(baseDir, reqPath).getCanonicalFile();
+                    if (!isWithinDirectory(targetDir, baseDir) || !targetDir.isDirectory() || query.isEmpty()) {
+                        sendJson(ex, new JsonArray());
+                    } else {
+                        sendJson(ex, searchDir(baseDir, targetDir, query));
+                    }
+                }
             } else if (method.equalsIgnoreCase("POST")) {
                 if ("upload".equals(action))
                     handleUpload(ex, params.getOrDefault("folder", ""));
@@ -906,7 +1083,76 @@ public class DashboardServer implements com.framework.api.WebServer {
             }
         }
 
-        private JsonArray scanDir(File dir) {
+        private void handleMetadata(HttpExchange ex, String path) throws IOException {
+            if (path == null) {
+                sendJson(ex, Map.of("success", false, "error", "Missing path"));
+                return;
+            }
+            try {
+                File mediaCacheDir = new File("media_cache").getCanonicalFile();
+                File f = new File(mediaCacheDir, path).getCanonicalFile();
+                if (!f.exists() || !isWithinDirectory(f, mediaCacheDir)) {
+                    sendJson(ex, Map.of("success", false, "error", "File not found"));
+                    return;
+                }
+
+                com.framework.core.media.MediaTranscoder transcoder = kernel
+                        .getService(com.framework.core.media.MediaTranscoder.class);
+                if (transcoder != null) {
+                    Map<String, Object> meta = transcoder.getVideoMetadata(f);
+                    if (meta != null && !meta.isEmpty()) {
+                        sendJson(ex, Map.of("success", true, "metadata", meta));
+                        return;
+                    }
+                }
+                sendJson(ex, Map.of("success", false, "error", "No metadata or transcoder unavailable"));
+            } catch (Exception e) {
+                sendJson(ex, Map.of("success", false, "error", e.getMessage()));
+            }
+        }
+
+        private JsonArray searchDir(File baseDir, File startDir, String query) {
+            JsonArray arr = new JsonArray();
+            try {
+                // Determine maximum limit to prevent abuse / OOM
+                int limit = 200;
+
+                List<File> matches = java.nio.file.Files.walk(startDir.toPath())
+                        .map(java.nio.file.Path::toFile)
+                        .filter(f -> !f.equals(startDir))
+                        .filter(f -> f.getName().toLowerCase().contains(query))
+                        .limit(limit)
+                        .toList();
+
+                for (File f : matches) {
+                    JsonObject o = new JsonObject();
+                    o.addProperty("name", f.getName());
+                    o.addProperty("type", f.isDirectory() ? "dir" : "file");
+                    o.addProperty("size", f.isDirectory() ? getFolderSize(f) : f.length());
+                    try {
+                        String basePath = baseDir.getCanonicalPath();
+                        String filePath = f.getCanonicalPath();
+                        if (filePath.startsWith(basePath)) {
+                            String sub = filePath.substring(basePath.length()).replace("\\", "/");
+                            if (sub.startsWith("/"))
+                                sub = sub.substring(1);
+                            o.addProperty("path", sub);
+                        } else {
+                            o.addProperty("path", f.getName());
+                        }
+                    } catch (Exception e) {
+                        o.addProperty("path", f.getName());
+                    }
+                    o.addProperty("lastMod", f.lastModified());
+                    arr.add(o);
+                }
+            } catch (IOException e) {
+                // Log exception if needed, returning empty or partial hits so far
+            }
+            return arr;
+        }
+
+        private JsonArray scanDir(File baseDir, File dir) {
             JsonArray arr = new JsonArray();
             File[] files = dir.listFiles();
             if (files != null) {
@@ -916,20 +1162,42 @@ public class DashboardServer implements com.framework.api.WebServer {
                             JsonObject o = new JsonObject();
                             o.addProperty("name", f.getName());
                             o.addProperty("type", f.isDirectory() ? "dir" : "file");
-                            o.addProperty("size", f.length());
-                            o.addProperty("path", f.getAbsolutePath());
+                            o.addProperty("size", f.isDirectory() ? getFolderSize(f) : f.length());
+                            try {
+                                String basePath = baseDir.getCanonicalPath();
+                                String filePath = f.getCanonicalPath();
+                                if (filePath.startsWith(basePath)) {
+                                    String sub = filePath.substring(basePath.length()).replace("\\", "/");
+                                    if (sub.startsWith("/"))
+                                        sub = sub.substring(1);
+                                    o.addProperty("path", sub);
+                                } else {
+                                    o.addProperty("path", f.getName());
+                                }
+                            } catch (Exception e) {
+                                o.addProperty("path", f.getName());
+                            }
                             o.addProperty("lastMod", f.lastModified());
-                            if (f.isDirectory())
-                                o.add("children", scanDir(f));
                             arr.add(o);
                         });
             }
             return arr;
         }
 
+        private long getFolderSize(File folder) {
+            try {
+                return java.nio.file.Files.walk(folder.toPath())
+                        .filter(p -> p.toFile().isFile())
+                        .mapToLong(p -> p.toFile().length())
+                        .sum();
+            } catch (IOException e) {
+                return 4096;
+            }
+        }
+
         private void handleReadText(HttpExchange ex, String path) throws IOException {
-            File f = new File(path);
             File mediaCacheDir = new File("media_cache").getCanonicalFile();
+            File f = new File(mediaCacheDir, path).getCanonicalFile();
 
             if (f.exists() && isWithinDirectory(f, mediaCacheDir)) {
                 sendJson(ex, Map.of("content", Files.readString(f.toPath(), StandardCharsets.UTF_8)));
@@ -941,8 +1209,8 @@ public class DashboardServer implements com.framework.api.WebServer {
         private void handleSaveText(HttpExchange ex) throws IOException {
             try (InputStreamReader isr = new InputStreamReader(ex.getRequestBody(), StandardCharsets.UTF_8)) {
                 JsonObject body = gson.fromJson(isr, JsonObject.class);
-                File f = new File(body.get("path").getAsString());
                 File mediaCacheDir = new File("media_cache").getCanonicalFile();
+                File f = new File(mediaCacheDir, body.get("path").getAsString()).getCanonicalFile();
 
                 if (isWithinDirectory(f, mediaCacheDir)) {
                     Files.writeString(f.toPath(), body.get("content").getAsString(), StandardCharsets.UTF_8);
@@ -984,8 +1252,8 @@ public class DashboardServer implements com.framework.api.WebServer {
             try {
                 if (path == null)
                     return false;
-                File f = new File(path);
                 File mediaCacheDir = new File("media_cache").getCanonicalFile();
+                File f = new File(mediaCacheDir, path).getCanonicalFile();
                 if (!isWithinDirectory(f, mediaCacheDir)) {
                     logger.warn("Delete rejected: Path is outside media_cache: {}", path);
                     return false;
@@ -1056,9 +1324,9 @@ public class DashboardServer implements com.framework.api.WebServer {
             try {
                 if (path == null)
                     return false;
-                File f = new File(path);
                 File mediaCacheDir = new File("media_cache").getCanonicalFile();
-                File newFile = new File(f.getParent(), newName);
+                File f = new File(mediaCacheDir, path).getCanonicalFile();
+                File newFile = new File(f.getParentFile(), newName).getCanonicalFile();
                 return isWithinDirectory(f, mediaCacheDir) &&
                         isWithinDirectory(newFile, mediaCacheDir) &&
                         f.renameTo(newFile);
@@ -1068,17 +1336,18 @@ public class DashboardServer implements com.framework.api.WebServer {
         }
 
         private void handleShare(HttpExchange ex, String path) throws IOException {
-            if (path == null || !new File(path).exists()) {
+            File mediaCacheDir = new File("media_cache").getCanonicalFile();
+            File f = new File(mediaCacheDir, path).getCanonicalFile();
+            if (path == null || !f.exists()) {
                 sendJson(ex, Map.of("success", false, "error", "File not found"));
                 return;
             }
             // Restrict share links to media_cache only
-            File mediaCacheDir = new File("media_cache").getCanonicalFile();
-            if (!new File(path).getCanonicalPath().startsWith(mediaCacheDir.getCanonicalPath())) {
+            if (!f.getCanonicalPath().startsWith(mediaCacheDir.getCanonicalPath())) {
                 sendJson(ex, Map.of("success", false, "error", "Sharing is only allowed for files in media_cache"));
                 return;
             }
-            String id = linkManager.createLink(path);
+            String id = linkManager.createLink(f.getAbsolutePath());
             sendJson(ex, Map.of("success", true, "link", id));
         }
 
@@ -1092,15 +1361,16 @@ public class DashboardServer implements com.framework.api.WebServer {
                 return;
             }
 
-            File src = new File(srcPath);
             File mediaCacheDir = new File("media_cache").getCanonicalFile();
+            File src = new File(mediaCacheDir, srcPath).getCanonicalFile();
 
             // Resolve destination: media_cache / destFolder
             File destDir = new File("media_cache");
-            if (!destFolder.isEmpty()) {
-                destDir = new File(destDir, destFolder);
+            if (!destFolder.isEmpty() && !destFolder.equals("media_cache")) {
+                destDir = new File(destDir, destFolder).getCanonicalFile();
+            } else {
+                destDir = destDir.getCanonicalFile();
             }
-            // If destDir is just "media_cache", it's valid.
 
             if (!src.exists() || !isWithinDirectory(src, mediaCacheDir) || !isWithinDirectory(destDir, mediaCacheDir)) {
                 sendJson(ex, Map.of("success", false, "error", "Invalid paths"));
@@ -1257,8 +1527,8 @@ public class DashboardServer implements com.framework.api.WebServer {
             }
 
             try {
-                File f = new File(path);
                 File mediaCacheDir = new File("media_cache").getCanonicalFile();
+                File f = new File(mediaCacheDir, path).getCanonicalFile();
 
                 if (!f.exists() || !isWithinDirectory(f, mediaCacheDir)) {
                     ex.sendResponseHeaders(404, -1);
@@ -1284,18 +1554,34 @@ public class DashboardServer implements com.framework.api.WebServer {
             String path = parseQuery(ex.getRequestURI().getQuery()).get("path");
             MediaTranscoder transcoder = kernel.getService(MediaTranscoder.class);
 
-            if (transcoder != null) {
-                File f = transcoder.getOrCreateThumbnail(new File(path));
-                if (f != null && f.exists()) {
-                    ex.getResponseHeaders().add("Content-Type", "image/jpeg");
-                    ex.sendResponseHeaders(200, f.length());
-                    try (OutputStream os = ex.getResponseBody(); FileInputStream fis = new FileInputStream(f)) {
-                        fis.transferTo(os);
+            if (transcoder != null && path != null) {
+                try {
+                    File mediaCacheDir = new File("media_cache").getCanonicalFile();
+                    File src = new File(mediaCacheDir, path).getCanonicalFile();
+                    if (!isWithinDirectory(src, mediaCacheDir)) {
+                        ex.sendResponseHeaders(403, -1);
+                        return;
                     }
+                    File f = transcoder.getOrCreateThumbnail(src);
+                    if (f != null && f.exists()) {
+                        ex.getResponseHeaders().add("Content-Type", "image/jpeg");
+                        ex.sendResponseHeaders(200, f.length());
+                        try (OutputStream os = ex.getResponseBody(); FileInputStream fis = new FileInputStream(f)) {
+                            fis.transferTo(os);
+                        }
+                    }
+                } catch (Exception e) {
+                    ex.sendResponseHeaders(500, -1);
                 }
             } else {
                 ex.sendResponseHeaders(404, -1);
             }
+        }
+
+        private boolean isWithinDirectory(File file, File directory) throws IOException {
+            String canonicalFile = file.getCanonicalPath();
+            String canonicalDir = directory.getCanonicalPath();
+            return canonicalFile.startsWith(canonicalDir);
         }
     }
 
@@ -1469,7 +1755,8 @@ public class DashboardServer implements com.framework.api.WebServer {
                         // Better: UI should send JAR name.
                         // Fallback: Scan dir?
                         File pluginDir = new File("plugins");
-                        File[] jars = pluginDir.listFiles((d, n) -> n.toLowerCase().contains(pluginName.toLowerCase()));
+                        File[] jars = pluginDir
+                                .listFiles((d, n) -> n.toLowerCase().contains(pluginName.toLowerCase()));
                         if (jars != null && jars.length > 0) {
                             kernel.getPluginLoader().loadPluginFromFile(jars[0], config);
                         }
@@ -1480,7 +1767,8 @@ public class DashboardServer implements com.framework.api.WebServer {
                 } else if ("save_settings".equals(action)) {
                     String pluginName = body.get("plugin").getAsString();
                     JsonObject newSettings = body.getAsJsonObject("settings");
-                    Map<String, String> map = config.pluginConfigs.computeIfAbsent(pluginName, k -> new HashMap<>());
+                    Map<String, String> map = config.pluginConfigs.computeIfAbsent(pluginName,
+                            k -> new HashMap<>());
 
                     for (String key : newSettings.keySet()) {
                         String val = newSettings.get(key).getAsString();

@@ -205,18 +205,21 @@ public class TelegramListenerService extends Thread {
 
     private void handleCommand(String text, long chatId, Integer threadId) {
         String[] parts = text.split(" ");
-        String cmd = parts[0].toLowerCase();
+        String fullCmd = parts[0].toLowerCase();
+        String cmd = fullCmd.startsWith("/") ? fullCmd.substring(1) : fullCmd;
         String[] args = (parts.length > 1) ? Arrays.copyOfRange(parts, 1, parts.length) : new String[0];
 
         // 1. Zuerst in der lokalen Plugin-Registry schauen
-        if (localRegistry.containsKey(cmd)) {
-            localRegistry.get(cmd).handle(chatId, threadId, cmd, args);
+        if (localRegistry.containsKey(cmd) || localRegistry.containsKey(fullCmd)) {
+            CommandHandler handler = localRegistry.getOrDefault(cmd, localRegistry.get(fullCmd));
+            handler.handle(chatId, threadId, fullCmd, args);
             return;
         }
 
         // 2. Dann in der globalen Kernel-Registry schauen (wenn vorhanden)
-        if (kernelRegistryReference != null && kernelRegistryReference.containsKey(cmd)) {
-            kernelRegistryReference.get(cmd).handle(chatId, threadId, cmd, args);
+        if (kernelRegistryReference != null && (kernelRegistryReference.containsKey(cmd) || kernelRegistryReference.containsKey(fullCmd))) {
+            CommandHandler handler = kernelRegistryReference.getOrDefault(cmd, kernelRegistryReference.get(fullCmd));
+            handler.handle(chatId, threadId, fullCmd, args);
             return;
         }
 

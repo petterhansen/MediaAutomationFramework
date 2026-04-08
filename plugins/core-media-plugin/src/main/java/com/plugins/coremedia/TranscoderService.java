@@ -103,15 +103,23 @@ public class TranscoderService implements MediaTranscoder {
             return new ArrayList<>();
 
         String name = input.getName().toLowerCase();
+
+        // Fast-fail check for already transcoded items
+        if (name.endsWith("_processed.mp4") || name.endsWith("_preview.mp4")) {
+            logger.info("⏩ Skipping FFmpeg for already transcoded file: {}", input.getName());
+            return List.of(input);
+        }
+
         boolean isGif = name.endsWith(".gif");
         boolean useWatermark = isWatermarkEnabled();
 
         try {
             VideoProbeResult probe = probeVideo(input);
             boolean isValidVideo = (probe != null && probe.width > 0 && probe.height > 0);
+            boolean isValidAudio = (probe != null && probe.width == 0 && probe.duration > 0);
 
             // FALLBACK: Wenn Probe fehlschlägt, Header manuell prüfen
-            if (!isValidVideo) {
+            if (!isValidVideo && !isValidAudio) {
                 if (hasVideoHeader(input)) {
                     logger.warn(
                             "⚠️ Probe fehlgeschlagen für {}, aber Datei-Header sieht valide aus. Versuche blinde Verarbeitung.",
@@ -119,6 +127,7 @@ public class TranscoderService implements MediaTranscoder {
                     // Wir tun so, als wäre alles ok, nutzen aber Defaults (keine Vorschau, kein
                     // Split)
                     probe = new VideoProbeResult(1920, 1080, 0, "1:1", 0);
+                    isValidVideo = true;
                 } else {
                     // Wirklich kaputt (z.B. HTML Error Page)
                     String contentSnippet = readHeaderSnippet(input);
@@ -127,6 +136,13 @@ public class TranscoderService implements MediaTranscoder {
                     input.delete();
                     return new ArrayList<>();
                 }
+            }
+
+            // Audio-Pass-Through
+            if (isValidAudio) {
+                logger.info("🎵 Only Audio identified in {} (Dur: {}s). Skipping video transcoding.", input.getName(),
+                        probe.duration);
+                return List.of(input);
             }
 
             if (isGif) {
@@ -146,7 +162,7 @@ public class TranscoderService implements MediaTranscoder {
 
             // Preview nur erstellen, wenn wir die Dauer kennen und > 60s
             if (probe.duration > 60) {
-                preview = generateRobustPreview(input, probe.duration);
+                preview = generateRobustPreview(input, probe.duration, useWatermark);
             }
 
             List<File> resultFiles = new ArrayList<>();
@@ -168,8 +184,8 @@ public class TranscoderService implements MediaTranscoder {
                 resultFiles.add(input);
             }
 
-            if (!resultFiles.isEmpty()) {
-                getOrCreateThumbnail(resultFiles.get(0));
+            for (File f : resultFiles) {
+                getOrCreateThumbnail(f);
             }
 
             if (preview != null && preview.exists()) {
@@ -249,7 +265,7 @@ public class TranscoderService implements MediaTranscoder {
         return executeFFmpeg(cmd, "GIF-Convert") && out.exists() ? out : null;
     }
 
-    private File generateRobustPreview(File input, double duration) {
+    private File generateRobustPreview(File input, double duration, boolean useWm) {
         if (duration <= 0)
             return null; // Ohne Dauer keine Preview
         int clips = 9;
@@ -270,6 +286,14 @@ public class TranscoderService implements MediaTranscoder {
             String ffmpeg = OsUtils.getFfmpegCommand();
             logger.info("🎬 Erstelle Robust-Preview für {}...", baseName);
 
+            String filterBase = "scale=640:-2,setsar=1";
+            if (useWm) {
+                String wmFilter = getDrawTextFilter();
+                if (wmFilter != null) {
+                    filterBase += "," + wmFilter;
+                }
+            }
+
             for (int i = 0; i < clips; i++) {
                 double startTime = startOffset + (i * step);
                 File segFile = new File(tempDir, String.format("seg_%03d.mp4", i));
@@ -284,7 +308,7 @@ public class TranscoderService implements MediaTranscoder {
                 cmd.add("-i");
                 cmd.add(input.getAbsolutePath());
                 cmd.add("-vf");
-                cmd.add("scale=640:-2,setsar=1");
+                cmd.add(filterBase);
                 cmd.add("-c:v");
                 cmd.add("libx264");
                 cmd.add("-preset");
@@ -465,6 +489,7 @@ public class TranscoderService implements MediaTranscoder {
             double duration = 0;
             String sar = "1:1";
             int rotation = 0;
+            boolean hasAudio = false;
 
             // Regex from predecessor (MetaDataAnalyzer.java)
             Pattern resPattern = Pattern.compile("Video:.*,\\s(\\d{2,5})x(\\d{2,5})");
@@ -479,6 +504,11 @@ public class TranscoderService implements MediaTranscoder {
                     if (mRes.find()) {
                         width = Integer.parseInt(mRes.group(1));
                         height = Integer.parseInt(mRes.group(2));
+                    }
+
+                    // Match Audio
+                    if (line.contains("Audio:")) {
+                        hasAudio = true;
                     }
 
                     // Match SAR
@@ -515,8 +545,17 @@ public class TranscoderService implements MediaTranscoder {
             }
             p.waitFor();
 
-            if (width > 0 && height > 0)
+            if (width > 0 && height > 0) {
                 return new VideoProbeResult(width, height, duration, sar, rotation);
+            }
+
+            // Special case: valid audio file (no video track)
+            if (hasAudio && duration > 0) {
+                // Return a dummy result that indicates valid media (though 0x0 video)
+                // We'll treat it as valid but needsFix() returns false so we don't try to
+                // transcode it as video
+                return new VideoProbeResult(0, 0, duration, "1:1", 0);
+            }
 
         } catch (Exception e) {
             logger.debug("Probe failed: {}", e.getMessage());

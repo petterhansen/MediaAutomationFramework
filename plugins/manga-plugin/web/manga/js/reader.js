@@ -18,7 +18,7 @@
     let controlsVisible = false;
     let controlsTimeout = null;
     let sidebarCollapsed = false;
-    let preloadCount = 3;
+    let preloadCount = 5;
     let profileId = localStorage.getItem('maf_manga_profile_id');
 
     function getToken() {
@@ -26,9 +26,14 @@
     }
 
     function apiHeaders() {
-        return {
+        const headers = {
             'X-MAF-Token': getToken()
         };
+        const profileId = localStorage.getItem('maf_manga_profile_id');
+        if (profileId) {
+            headers['X-Manga-Profile-Id'] = profileId;
+        }
+        return headers;
     }
 
     async function fetchApi(url, options = {}) {
@@ -78,7 +83,6 @@
 
             renderChapterList();
 
-            // Load the specified chapter
             if (currentChapterId) {
                 loadChapter(currentChapterId);
             } else if (chapters.length > 0) {
@@ -106,7 +110,7 @@
         });
     }
 
-    let isLoading = false; // Prevent double loads
+    let isLoading = false; 
 
     async function loadChapter(chapterId, targetPage = 0) {
         if (isLoading) return;
@@ -115,12 +119,10 @@
         currentChapterId = chapterId;
         pages = [];
 
-        // Update UI
         const chapter = chapters.find(ch => ch.id === chapterId);
         const chapterLabel = chapter ? 'Chapter ' + chapter.chapter : chapterId;
         document.getElementById('reader-current-chapter').textContent = chapterLabel;
 
-        // Highlight active chapter in sidebar
         document.querySelectorAll('#reader-chapter-list .chapter-item').forEach(li => {
             li.classList.remove('active');
         });
@@ -131,12 +133,10 @@
             items[idx].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
 
-        // Show loading
         const container = document.getElementById('page-container');
         container.innerHTML = '<div class="loading-spinner" id="reader-loading"><div class="spinner"></div><span>Loading chapter...</span></div>';
 
         try {
-            // Build page request URL
             let url = API_BASE + '/pages?chapterId=' + encodeURIComponent(chapterId) + '&provider=' + encodeURIComponent(provider);
             if (chapter) {
                 const slug = mangaTitle.replace(/[^a-zA-Z0-9 ]/g, '').trim().replace(/\s+/g, '-').toLowerCase();
@@ -149,6 +149,9 @@
                 if (url.startsWith('/')) {
                     return url + (url.includes('?') ? '&' : '?') + 'token=' + getToken();
                 }
+                if (url.startsWith('http') || url.includes('mangadex') || url.includes('mangapill')) {
+                    return API_BASE + '/proxy-image?url=' + encodeURIComponent(url);
+                }
                 return url;
             });
 
@@ -158,7 +161,6 @@
                 return;
             }
 
-            // Determine start page
             if (targetPage === 'last') {
                 currentPage = Math.max(0, pages.length - 1);
             } else {
@@ -167,11 +169,9 @@
 
             renderPages();
 
-            // Scroll to position
             if (mode === 'vertical') {
                 const content = document.getElementById('reader-content');
                 if (targetPage === 'last') {
-                    // Scroll to bottom
                     setTimeout(() => {
                         content.scrollTop = content.scrollHeight;
                     }, 50);
@@ -181,11 +181,8 @@
             }
 
             updateControls();
-
-            // Save reading progress
             saveProgress(chapterId, chapter ? chapter.chapter : '0', currentPage);
 
-            // Update URL without reload
             const params = new URLSearchParams({ mangaId, provider, chapterId, title: mangaTitle });
             history.replaceState(null, '', '/manga/reader?' + params.toString());
 
@@ -226,12 +223,7 @@
         });
 
         const readerContent = document.getElementById('reader-content');
-
-        // Remove old listeners to prevent duplicates if function called multiple times? 
-        // Actually this function is called on render, so cleaner to use named function or direct assignment
         readerContent.onscroll = handleVerticalScroll;
-
-        // Add wheel listener for top-of-page navigation (debounced)
         readerContent.onwheel = handleVerticalWheel;
     }
 
@@ -244,10 +236,9 @@
         const scrollBottom = readerContent.scrollTop + readerContent.clientHeight;
         const totalHeight = readerContent.scrollHeight;
 
-        // Detect Bottom -> Next Chapter
-        if (scrollBottom >= totalHeight - 10) { // Tolerance
+        if (scrollBottom >= totalHeight - 10) { 
             const now = Date.now();
-            if (now - lastScrollTime > 1000) { // Simple debounce
+            if (now - lastScrollTime > 1000) { 
                 lastScrollTime = now;
                 nextChapter();
             }
@@ -258,7 +249,6 @@
         if (isLoading) return;
         const readerContent = document.getElementById('reader-content');
 
-        // Detect Top -> Prev Chapter (only if scrolling UP at top)
         if (readerContent.scrollTop <= 0 && e.deltaY < 0) {
             const now = Date.now();
             if (now - lastScrollTime > 1000) {
@@ -275,10 +265,17 @@
         img.src = pages[currentPage];
         img.alt = `Page ${currentPage + 1}`;
         img.style.cssText = 'max-width:100%;max-height:100vh;object-fit:contain;';
-        img.onerror = () => { img.alt = `Page ${currentPage + 1} failed to load`; };
+        
+        // Bug Fix: Sichtbare Fehlermeldung statt schwarzem Nichts
+        img.onerror = () => { 
+            img.style.display = 'none';
+            const err = document.createElement('div');
+            err.innerHTML = `⚠️ Page ${currentPage + 1} failed to load`;
+            err.style.cssText = 'color: #f87171; padding: 2rem; border: 1px solid #f87171; border-radius: 8px; text-align: center; margin-top: 2rem;';
+            container.appendChild(err);
+        };
         container.appendChild(img);
 
-        // Preload adjacent pages
         for (let i = 1; i <= preloadCount; i++) {
             if (currentPage + i < pages.length) {
                 const link = document.createElement('link');
@@ -297,7 +294,6 @@
         let visiblePage = 0;
         images.forEach((img, i) => {
             const rect = img.getBoundingClientRect();
-            // Simple logic: if image top is roughly near top of viewport
             if (rect.top < viewHeight * 0.5 && rect.bottom > 0) {
                 visiblePage = i;
             }
@@ -305,12 +301,9 @@
 
         if (visiblePage !== currentPage) {
             currentPage = visiblePage;
-            // updateControls(); // Performance: don't update full controls on every scroll tick if possible
-
-            // Debounced progress save
             clearTimeout(window._progressSaveTimeout);
             window._progressSaveTimeout = setTimeout(() => {
-                updateControls(); // Update UI when scrolling stops/slows
+                updateControls(); 
                 const ch = chapters.find(c => c.id === currentChapterId);
                 saveProgress(currentChapterId, ch ? ch.chapter : '0', currentPage);
             }, 500);
@@ -321,7 +314,12 @@
     window.nextPage = function () {
         if (mode === 'vertical') {
             const readerContent = document.getElementById('reader-content');
-            readerContent.scrollBy({ top: readerContent.clientHeight * 0.9, behavior: 'smooth' });
+            const isAtBottom = readerContent.scrollTop + readerContent.clientHeight >= readerContent.scrollHeight - 20;
+            if (isAtBottom) {
+                nextChapter();
+            } else {
+                readerContent.scrollBy({ top: readerContent.clientHeight * 0.85, behavior: 'smooth' });
+            }
         } else {
             if (currentPage < pages.length - 1) {
                 currentPage++;
@@ -336,7 +334,12 @@
     window.prevPage = function () {
         if (mode === 'vertical') {
             const readerContent = document.getElementById('reader-content');
-            readerContent.scrollBy({ top: -readerContent.clientHeight * 0.9, behavior: 'smooth' });
+            const isAtTop = readerContent.scrollTop <= 10;
+            if (isAtTop) {
+                prevChapter();
+            } else {
+                readerContent.scrollBy({ top: -readerContent.clientHeight * 0.85, behavior: 'smooth' });
+            }
         } else {
             if (currentPage > 0) {
                 currentPage--;
@@ -351,9 +354,12 @@
     window.nextChapter = function () {
         if (isLoading) return;
         const idx = chapters.findIndex(ch => ch.id === currentChapterId);
+        
+        // Chapters are in ASCENDING order: [Ch 1 (idx 0), Ch 2 (idx 1), Ch 3 (idx 2)...]
+        // Progress means index INCREMENT
         if (idx >= 0 && idx < chapters.length - 1) {
             showToast('Loading next chapter...', 'info');
-            loadChapter(chapters[idx + 1].id, 0); // Start at beginning
+            loadChapter(chapters[idx + 1].id, 0); 
         } else {
             showToast('Last chapter reached', 'info');
         }
@@ -362,9 +368,11 @@
     window.prevChapter = function () {
         if (isLoading) return;
         const idx = chapters.findIndex(ch => ch.id === currentChapterId);
+        
+        // Chapters are in ASCENDING order: Backwards means index DECREMENT
         if (idx > 0) {
             showToast('Loading previous chapter...', 'info');
-            loadChapter(chapters[idx - 1].id, 'last'); // Start at END
+            loadChapter(chapters[idx - 1].id, 'last'); 
         } else {
             showToast('First chapter reached', 'info');
         }
@@ -429,7 +437,6 @@
         content.classList.toggle('vertical-mode', mode === 'vertical');
         content.classList.toggle('page-mode', mode === 'page');
 
-        // Re-scroll to top when switching to vertical
         if (mode === 'vertical') {
             content.scrollTop = 0;
             content.style.overflow = 'auto';
@@ -460,7 +467,6 @@
     // ======================== KEYBOARD SHORTCUTS ========================
     function setupKeyboardShortcuts() {
         document.addEventListener('keydown', (e) => {
-            // Don't trigger shortcuts when typing in inputs
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
             switch (e.key) {
@@ -522,11 +528,9 @@
 
     // ======================== TAP ZONES ========================
     function setupTapZones() {
-        // Clicking the top/bottom zones toggles controls
         document.getElementById('tap-zone-top').addEventListener('click', toggleControls);
         document.getElementById('tap-zone-bottom').addEventListener('click', toggleControls);
 
-        // In page mode, clicking left/right sides navigates
         document.getElementById('reader-content').addEventListener('click', (e) => {
             if (mode !== 'page') {
                 toggleControls();
@@ -546,7 +550,6 @@
             }
         });
 
-        // Show controls on mouse move near bottom
         document.addEventListener('mousemove', (e) => {
             if (e.clientY > window.innerHeight - 80) {
                 showControls();
@@ -563,14 +566,13 @@
                     mangaId, provider, chapterId, chapterNum,
                     page: String(page),
                     profileId: profileId || ''
-                })
+                }),
+                silent: true
             });
         } catch (e) {
-            // Silent fail — progress saving is best-effort
         }
     }
 
-    // ======================== UTILITIES ========================
     function showToast(message, type = 'info') {
         const container = document.getElementById('toast-container');
         const toast = document.createElement('div');

@@ -18,19 +18,51 @@
     }
 
     function apiHeaders() {
-        return {
+        const headers = {
             'X-MAF-Token': getToken()
         };
+        const profileId = localStorage.getItem('maf_manga_profile_id');
+        if (profileId) {
+            headers['X-Manga-Profile-Id'] = profileId;
+        }
+        return headers;
     }
 
     async function fetchApi(url, options = {}) {
         if (!options.headers) options.headers = apiHeaders();
         const res = await fetch(url, options);
-        if (res.status === 401) {
+        if (res.status === 401 && !options.silent) {
             window.location.href = '/login?redirect=' + encodeURIComponent(window.location.pathname + window.location.search);
             throw new Error('Unauthorized');
         }
         return res;
+    }
+
+    /**
+     * Standardizes image URLs:
+     * 1. If it's an internal /manga/ path, inject the MAF token.
+     * 2. If it's an external URL (mangadex, mangapill, etc.), wrap with our proxy.
+     * 3. Prevents double-proxying.
+     */
+    function getProxiedUrl(url) {
+        if (!url) return '';
+        
+        // 1. Internal library path (local files)
+        if (url.startsWith('/manga/')) {
+            return url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(getToken());
+        }
+
+        // 2. Already proxied -> return as-is
+        if (url.includes('/api/manga/proxy-image')) {
+            return url;
+        }
+
+        // 3. External URLs -> wrap with proxy
+        if (url.startsWith('http') || url.includes('mangadex') || url.includes('mangapill')) {
+            return API_BASE + '/proxy-image?url=' + encodeURIComponent(url);
+        }
+
+        return url;
     }
 
     // ======================== INIT ========================
@@ -39,7 +71,55 @@
         checkProfile();
         setupSearch();
         setupNsfwToggle();
+        loadPopular();
+
+        // Handle auto-open for discovery redirects (e.g. from Genre page)
+        const params = new URLSearchParams(window.location.search);
+        const autoId = params.get('id');
+        const autoProvider = params.get('provider');
+        if (autoId && autoProvider) {
+            setTimeout(() => {
+                openMangaDetail(autoId, autoProvider);
+                // Clear params to prevent re-opening on manual refresh
+                window.history.replaceState({}, document.title, window.location.pathname);
+            }, 500);
+        }
     });
+
+    async function loadPopular() {
+        const grid = document.getElementById('popular-grid');
+        grid.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+        try {
+            const res = await fetchApi(API_BASE + '/popular?limit=12', { silent: true });
+            const manga = await res.json();
+            grid.innerHTML = '';
+            manga.forEach(m => grid.appendChild(createMangaCard(m, false)));
+        } catch (e) {
+            grid.innerHTML = '<p class="text-muted">Failed to load popular manga</p>';
+        }
+    }
+
+    window.surpriseMe = async function() {
+        const btn = document.getElementById('surprise-btn');
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '🎲 Rolling...';
+        btn.disabled = true;
+
+        try {
+            const res = await fetchApi(API_BASE + '/random?provider=mangapill');
+            const manga = await res.json();
+            if (manga && manga.id) {
+                openMangaDetail(manga.id, manga.provider);
+            } else {
+                showToast('The dice failed! Try again.', 'error');
+            }
+        } catch (e) {
+            showToast('Random discovery failed', 'error');
+        } finally {
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        }
+    }
 
     function setupNsfwToggle() {
         const toggle = document.getElementById('nsfw-toggle');
@@ -75,7 +155,9 @@
             updateProfileUI();
             loadLibrary();
         } else {
-            openProfileModal();
+            // Redirect to dedicated login page
+            const target = window.location.pathname + window.location.search;
+            window.location.href = '/manga/login?redirect=' + encodeURIComponent(target);
         }
     }
 
@@ -88,12 +170,12 @@
         const list = document.getElementById('profile-list');
         list.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
         try {
-            const res = await fetchApi(API_BASE + '/profiles');
+            const res = await fetchApi(API_BASE + '/profiles', { silent: true });
             const profiles = await res.json();
             list.innerHTML = '';
 
             if (profiles.length === 0) {
-                list.innerHTML = '<p class="text-muted">No profiles found. Create one to start!</p>';
+                list.innerHTML = '<p class="text-muted">No profiles found. Create one with an invite code!</p>';
             }
 
             profiles.forEach(p => {
@@ -105,10 +187,10 @@
                 card.innerHTML = `
                     <div style="display:flex;align-items:center;">
                         <div class="profile-avatar">${escapeHtml(initials)}</div>
-                        <div class="profile-name">${escapeHtml(p.name)}</div>
+                        <div class="profile-name">${escapeHtml(p.name)} ${p.isProtected ? '<span class="profile-locked">🔒</span>' : ''}</div>
                     </div>
                 `;
-                card.onclick = () => selectProfile(p.id, p.name);
+                card.onclick = () => selectProfile(p);
                 list.appendChild(card);
             });
         } catch (e) {
@@ -117,45 +199,161 @@
     }
 
     window.createProfile = async function () {
-        const input = document.getElementById('new-profile-name');
-        const name = input.value.trim();
+        const nameInput = document.getElementById('new-profile-name');
+        const passInput = document.getElementById('new-profile-password');
+        const inviteInput = document.getElementById('new-profile-invite');
+
+        const name = nameInput.value.trim();
+        const password = passInput.value;
+        const inviteCode = inviteInput.value.trim();
+
         if (!name) return;
 
         try {
             const res = await fetchApi(API_BASE + '/profiles', {
                 method: 'POST',
-                body: JSON.stringify({ name })
+                body: JSON.stringify({ name, password, inviteCode })
             });
+
+            if (!res.ok) {
+                const error = await res.json();
+                showToast(error.error || 'Failed to create profile', 'error');
+                return;
+            }
+
             const profile = await res.json();
-            selectProfile(profile.id, profile.name);
-            input.value = '';
+            // Automatically select the new profile
+            currentProfile = { id: profile.id, name: profile.name };
+            localStorage.setItem('maf_manga_profile_id', profile.id);
+            localStorage.setItem('maf_manga_profile_name', profile.name);
+            updateProfileUI();
+            
+            document.getElementById('profile-modal').classList.remove('active');
+            loadLibrary();
+
+            nameInput.value = '';
+            passInput.value = '';
+            inviteInput.value = '';
         } catch (e) {
-            showToast('Failed to create profile', 'error');
+            showToast('Failed to create profile: Check invite code', 'error');
         }
     }
 
-    function selectProfile(id, name) {
+    function selectProfile(profile) {
+        if (profile.isProtected) {
+            openPasswordModal(profile);
+            return;
+        }
+        
+        applyProfile(profile.id, profile.name);
+    }
+
+    function openPasswordModal(profile) {
+        const modal = document.getElementById('password-modal');
+        const input = document.getElementById('profile-password-input');
+        const nameText = document.getElementById('password-target-name');
+        const btn = document.getElementById('password-submit-btn');
+
+        nameText.textContent = `Login to ${profile.name}`;
+        input.value = '';
+        modal.classList.add('active');
+
+        btn.onclick = async () => {
+            const password = input.value;
+            try {
+                const res = await fetchApi(API_BASE + '/profiles/auth', {
+                    method: 'POST',
+                    body: JSON.stringify({ profileId: profile.id, password })
+                });
+                if (res.ok) {
+                    modal.classList.remove('active');
+                    applyProfile(profile.id, profile.name);
+                } else {
+                    showToast('Invalid password', 'error');
+                }
+            } catch (e) {
+                showToast('Authentication failed', 'error');
+            }
+        };
+    }
+
+    window.closePasswordModal = function() {
+        document.getElementById('password-modal').classList.remove('active');
+    }
+
+    function applyProfile(id, name) {
         currentProfile = { id, name };
         localStorage.setItem('maf_manga_profile_id', id);
         localStorage.setItem('maf_manga_profile_name', name);
         updateProfileUI();
         document.getElementById('profile-modal').classList.remove('active');
-        loadLibrary(); // Reload library with new profile context
+        loadLibrary();
     }
 
     function updateProfileUI() {
+        const nameEl = document.getElementById('current-profile-name');
+        const settingsBtn = document.getElementById('settings-btn');
         if (currentProfile) {
-            document.getElementById('current-profile-name').textContent = currentProfile.name;
+            nameEl.textContent = currentProfile.name;
+            if (settingsBtn) settingsBtn.style.display = 'flex';
+        } else {
+            nameEl.textContent = 'Guest';
+            if (settingsBtn) settingsBtn.style.display = 'none';
         }
+    }
+
+    window.openSettingsModal = function () {
+        document.getElementById('settings-modal').classList.add('active');
+        document.getElementById('settings-old-password').value = '';
+        document.getElementById('settings-new-password').value = '';
+    }
+
+    window.closeSettingsModal = function () {
+        document.getElementById('settings-modal').classList.remove('active');
+    }
+
+    window.updateProfilePassword = async function () {
+        const oldPassEl = document.getElementById('settings-old-password');
+        const newPassEl = document.getElementById('settings-new-password');
+        const oldPassword = oldPassEl.value;
+        const newPassword = newPassEl.value;
+
+        if (!newPassword) {
+            showToast('New PIN cannot be empty', 'error');
+            return;
+        }
+
+        try {
+            const res = await fetchApi(API_BASE + '/profiles/update-password', {
+                method: 'POST',
+                body: JSON.stringify({ profileId: currentProfile.id, oldPassword, newPassword })
+            });
+
+            if (res.ok) {
+                showToast('PIN updated successfully', 'success');
+                closeSettingsModal();
+            } else {
+                const error = await res.json();
+                showToast(error.error || 'Failed to update PIN', 'error');
+            }
+        } catch (e) {
+            showToast('Connection failed', 'error');
+        }
+    }
+
+    window.logoutProfile = function () {
+        localStorage.removeItem('maf_manga_profile_id');
+        localStorage.removeItem('maf_manga_profile_name');
+        window.location.reload();
     }
 
     // ======================== PROVIDERS ========================
     async function loadProviders() {
         try {
-            const res = await fetchApi(API_BASE + '/providers');
+            const res = await fetchApi(API_BASE + '/providers', { silent: true });
             providers = await res.json();
             const select = document.getElementById('search-provider');
-            select.innerHTML = '<option value="">All Sources</option>'; // clear first
+            select.innerHTML = '<option value="">All Sources</option>'; 
 
             providers.forEach(p => {
                 const opt = document.createElement('option');
@@ -176,10 +374,8 @@
                     const toggle = document.getElementById('nsfw-toggle');
                     if (!toggle.checked) {
                         toggle.checked = true;
-                        // Trigger change event to persist and update UI
                         const event = new Event('change');
                         toggle.dispatchEvent(event);
-
                         showToast('Restricted source selected: Sensitive Media enabled', 'info');
                     }
                 }
@@ -194,7 +390,8 @@
         try {
             const res = await fetchApi(API_BASE + '/cover', {
                 method: 'POST',
-                body: JSON.stringify({ mangaId, provider })
+                body: JSON.stringify({ mangaId, provider }),
+                silent: true
             });
             const data = await res.json();
             if (data.status === 'ok' && data.coverUrl) {
@@ -280,8 +477,8 @@
 
         try {
             let url = API_BASE + '/search?q=' + encodeURIComponent(query) + '&limit=20';
-            if (provider) url += '&provider=' + encodeURIComponent(provider);
-
+            
+            // Bug Fix: Duplicate Parameter removed
             if (provider) url += '&provider=' + encodeURIComponent(provider);
 
             const nsfw = document.getElementById('nsfw-toggle').checked;
@@ -318,11 +515,7 @@
 
         let coverImg;
         if (manga.coverUrl) {
-            let src = manga.coverUrl;
-            // append token for local images
-            if (src.startsWith('/manga/')) {
-                src += (src.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(getToken());
-            }
+            let src = getProxiedUrl(manga.coverUrl);
             coverImg = `<img src="${escapeHtml(src)}" alt="${escapeHtml(manga.title)}" loading="lazy">`;
         } else {
             const uniqueId = `cover-${String(manga.id).replace(/[^a-zA-Z0-9]/g, '')}-${manga.provider}`;
@@ -363,7 +556,6 @@
         const modal = document.getElementById('detail-modal');
         modal.classList.add('active');
 
-        // Set loading state
         document.getElementById('modal-title').textContent = 'Loading...';
         document.getElementById('modal-author').textContent = '';
         document.getElementById('modal-description').textContent = '';
@@ -386,11 +578,7 @@
             document.getElementById('modal-author').textContent = info.author ? 'by ' + info.author : '';
             document.getElementById('modal-description').textContent = info.description || '';
 
-            let coverSrc = info.coverUrl || '';
-            if (coverSrc.startsWith('/manga/')) {
-                coverSrc += (coverSrc.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(getToken());
-            }
-            document.getElementById('modal-cover').src = coverSrc;
+            document.getElementById('modal-cover').src = getProxiedUrl(info.coverUrl);
 
             // Tags
             const tagsEl = document.getElementById('modal-tags');
@@ -459,10 +647,10 @@
                     <span class="chapter-group">${escapeHtml(ch.scanlationGroup || '')}</span>
                     <div class="chapter-actions">
                         ${actionBtns}
-                        <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); readChapter('${escapeAttr(ch.id)}', '${escapeAttr(ch.chapter)}')">Read</button>
+                        <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); readChapter('${escapeAttr(ch.id)}')">Read</button>
                     </div>
                 `;
-                li.addEventListener('click', () => readChapter(ch.id, ch.chapter));
+                li.addEventListener('click', () => readChapter(ch.id));
                 chList.appendChild(li);
             });
 
@@ -480,12 +668,10 @@
         currentManga = null;
     };
 
-    // Close modal on overlay click
     document.getElementById('detail-modal').addEventListener('click', (e) => {
         if (e.target.classList.contains('modal-overlay')) closeModal();
     });
 
-    // Close modal on Escape
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') closeModal();
     });
@@ -512,7 +698,6 @@
             addBtn.classList.add('btn-secondary');
             showToast('Added to library: ' + info.title, 'success');
 
-            // Refresh library in background
             loadLibrary();
         } catch (e) {
             showToast('Failed to add to library', 'error');
@@ -554,13 +739,11 @@
         }
     };
 
-    // Dropdown & Range Logic
     window.toggleDownloadDropdown = function () {
         const dd = document.getElementById('download-dropdown');
         if (dd) dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
     };
 
-    // Close dropdown when clicking outside
     document.addEventListener('click', (e) => {
         const dd = document.getElementById('download-dropdown');
         const btn = document.getElementById('modal-download-btn');
@@ -577,28 +760,20 @@
         const startSelect = document.getElementById('range-start');
         const endSelect = document.getElementById('range-end');
 
-        // Clear and populate
         startSelect.innerHTML = '';
         endSelect.innerHTML = '';
 
-        // Chapters are typically sorted DESC (newest first). 
-        // For range selection, visual order (Top to Bottom) usually implies visual indices.
-        // But logical range (e.g. Ch 1 to 10) means we need to handle the order carefully.
-        // We'll populate exactly as they appear in the list (index 0 to N).
-
         chapters.forEach((ch, index) => {
             const label = `Ch. ${ch.chapter} - ${ch.title || ''}`;
-            const opt1 = new Option(label, index); // Value is index
+            const opt1 = new Option(label, index);
             const opt2 = new Option(label, index);
             startSelect.add(opt1);
             endSelect.add(opt2);
         });
 
-        // Default: Start = Last item (oldest), End = First item (newest)
-        // Adjust defaults if needed.
         if (chapters.length > 0) {
-            startSelect.selectedIndex = chapters.length - 1; // Oldest
-            endSelect.selectedIndex = 0; // Newest
+            startSelect.selectedIndex = chapters.length - 1; 
+            endSelect.selectedIndex = 0;
         }
 
         container.style.display = 'block';
@@ -616,11 +791,9 @@
         const endIdx = parseInt(document.getElementById('range-end').value);
         const chapters = currentManga.details.chapters;
 
-        // Determine min and max index to be safe regardless of selection order
         const min = Math.min(startIdx, endIdx);
         const max = Math.max(startIdx, endIdx);
 
-        // Extract IDs in that range
         const selectedChapters = chapters.slice(min, max + 1);
         const chapterIds = selectedChapters.map(ch => ch.id);
 
@@ -676,7 +849,6 @@
             });
 
             showToast('Deleted Chapter ' + chapterNum, 'success');
-            // Refresh details to update UI
             openMangaDetail(info.id, info.provider);
         } catch (e) {
             showToast('Failed to delete chapter', 'error');
@@ -692,7 +864,6 @@
             return;
         }
 
-        // Start from reading progress or first chapter
         let startChapter = chapters[0];
         if (currentManga.progress && currentManga.progress.lastChapterId) {
             const found = chapters.find(ch => ch.id === currentManga.progress.lastChapterId);
@@ -702,7 +873,8 @@
         openReader(info.id, info.provider, startChapter.id, info.title);
     };
 
-    window.readChapter = function (chapterId, chapterNum) {
+    // Bug Fix: Unbenutzten 'chapterNum' Parameter entfernt
+    window.readChapter = function (chapterId) {
         if (!currentManga) return;
         const info = currentManga.details.info;
         openReader(info.id, info.provider, chapterId, info.title);
@@ -712,9 +884,6 @@
         const params = new URLSearchParams({
             mangaId, provider, chapterId, title: title || ''
         });
-        // Profile ID will be read from localStorage by reader.js, but we could pass it too
-        // if (currentProfile) params.set('profileId', currentProfile.id);
-
         window.location.href = '/manga/reader?' + params.toString();
     }
 
@@ -742,4 +911,20 @@
         if (!str) return '';
         return str.replace(/'/g, "\\'").replace(/"/g, '&quot;');
     }
+
+    // Settings Tab Switching
+    window.switchTab = function(tabId) {
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.classList.remove('active');
+            if (btn.getAttribute('onclick').includes(tabId)) {
+                btn.classList.add('active');
+            }
+        });
+        
+        document.querySelectorAll('.settings-tab').forEach(tab => {
+            tab.style.display = 'none';
+        });
+        document.getElementById(tabId).style.display = 'block';
+    }
+
 })();

@@ -143,6 +143,34 @@ public class DatabaseService {
     }
 
     /**
+     * Check if URL has already been fully uploaded
+     */
+    public boolean isUploaded(String url) {
+        return jdbi.withHandle(handle -> {
+            Integer count = handle.createQuery("SELECT COUNT(*) FROM media_items WHERE url = ? AND status = 'UPLOADED'")
+                    .bind(0, url)
+                    .mapTo(Integer.class)
+                    .one();
+            return count > 0;
+        });
+    }
+
+    /**
+     * Check if a specific file name has already been fully uploaded by a creator
+     */
+    public boolean isFileUploaded(String creator, String fileName) {
+        return jdbi.withHandle(handle -> {
+            Integer count = handle.createQuery(
+                    "SELECT COUNT(*) FROM media_items WHERE creator = ? AND file_name = ? AND status = 'UPLOADED'")
+                    .bind(0, creator)
+                    .bind(1, fileName)
+                    .mapTo(Integer.class)
+                    .one();
+            return count > 0;
+        });
+    }
+
+    /**
      * Update item with processing info
      */
     public void markProcessed(String url, String fileName, long fileSize, int width, int height, double duration) {

@@ -38,5 +38,6 @@
     <module>plugins/manga-plugin</module>
     <module>plugins/tiktok-plugin</module>
     <module>plugins/socials-plugin</module>
+    <module>plugins/gallery-dl-plugin</module>
   </modules>
 </project>

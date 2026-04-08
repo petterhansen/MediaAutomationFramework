@@ -38,6 +38,12 @@
             background: rgba(99, 102, 241, 0.1);
         }
 
+        .profile-locked {
+            font-size: 0.8rem;
+            opacity: 0.6;
+            margin-left: 10px;
+        }
+
         .profile-avatar {
             width: 40px;
             height: 40px;
@@ -62,8 +68,20 @@
             background: rgba(255, 255, 255, 0.1);
         }
 
-        .navbar-profile:hover {
-            background: rgba(255, 255, 255, 0.1);
+        .settings-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 5px;
+            font-size: 1.1rem;
+            transition: color 0.2s;
+            display: flex;
+            align-items: center;
+        }
+
+        .settings-btn:hover {
+            color: var(--accent-color);
         }
 
         /* NSFW Toggle */
@@ -106,21 +124,27 @@
 
 <body>
 
-    <!-- Navbar -->
     <nav class="navbar">
         <a href="/manga" class="navbar-brand">
             <span class="icon">🖋️</span>
             <span>Rohan</span>
         </a>
         <div class="navbar-links">
-            <!-- Public mode: no dashboard links -->
+            <a href="/manga/genre" class="nav-link" style="margin-right: 20px; color: var(--text-secondary); text-decoration: none; font-size: 0.95rem; font-weight: 500; transition: color 0.2s;" onmouseover="this.style.color='var(--accent-color)'" onmouseout="this.style.color='var(--text-secondary)'">
+                📂 Genres
+            </a>
             <div class="navbar-profile" id="nav-profile" onclick="openProfileModal()">
                 👤 <span id="current-profile-name">Guest</span>
             </div>
+            <button class="settings-btn" id="settings-btn" onclick="openSettingsModal()" title="Profile Settings" style="display:none;">
+                ⚙️
+            </button>
+            <button class="settings-btn" onclick="logoutProfile()" title="Logout" style="margin-left: 10px;">
+                🚪
+            </button>
         </div>
     </nav>
 
-    <!-- Search -->
     <div class="search-container">
         <div class="search-wrapper">
             <span class="search-icon">🔍</span>
@@ -135,6 +159,11 @@
                 </select>
             </div>
             <div class="search-control-group">
+                <button class="btn btn-secondary" id="surprise-btn" onclick="surpriseMe()" title="Get a random manga">
+                    🎲 Surprise Me
+                </button>
+            </div>
+            <div class="search-control-group">
                 <label for="nsfw-toggle">Sensitive Media</label>
                 <label class="nsfw-toggle" title="Show Sensitive Content" id="nsfw-label">
                     <input type="checkbox" id="nsfw-toggle">
@@ -144,16 +173,18 @@
         </div>
     </div>
 
-    <!-- Main Content -->
     <div class="content-area">
 
-        <!-- Search Results (hidden by default) -->
         <div id="search-results-section" style="display:none;">
             <h2 class="section-title">🔍 Search Results</h2>
             <div class="manga-grid" id="search-results-grid"></div>
         </div>
 
-        <!-- Library -->
+        <div id="popular-section">
+            <h2 class="section-title">🔥 Popular</h2>
+            <div class="manga-grid" id="popular-grid"></div>
+        </div>
+
         <div id="library-section">
             <h2 class="section-title">📖 Your Library</h2>
             <div class="manga-grid" id="library-grid"></div>
@@ -164,29 +195,97 @@
             </div>
         </div>
 
-        <!-- Loading -->
         <div class="loading-spinner" id="loading" style="display:none;">
             <div class="spinner"></div>
             <span>Loading...</span>
         </div>
     </div>
 
-    <!-- Profile Modal -->
     <div class="modal-overlay" id="profile-modal" style="z-index: 2000;">
         <div class="modal" style="max-width: 400px; text-align: center;">
             <h2 class="section-title">Who is reading?</h2>
             <div id="profile-list" class="profile-list">
-                <!-- Profiles injected here -->
-            </div>
-            <div class="profile-create">
-                <input type="text" id="new-profile-name" placeholder="Enter new profile name" class="search-input"
-                    style="width: 70%; margin-right: 10px;">
-                <button class="btn btn-primary" onclick="createProfile()">Create</button>
+                </div>
+            <div class="profile-create" style="display: flex; flex-direction: column; gap: 10px; margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 20px;">
+                <h3 style="font-size: 0.9rem; margin-bottom: 5px;">Create New Profile</h3>
+                <input type="text" id="new-profile-name" placeholder="Profile Name" class="search-input">
+                <input type="password" id="new-profile-password" placeholder="Password (Optional)" class="search-input">
+                <input type="text" id="new-profile-invite" placeholder="Invite Code" class="search-input">
+                <button class="btn btn-primary" onclick="createProfile()">Create Profile</button>
             </div>
         </div>
     </div>
 
-    <!-- Manga Detail Modal -->
+    <div class="modal-overlay" id="password-modal" style="z-index: 2100;">
+        <div class="modal" style="max-width: 350px; text-align: center;">
+            <button class="modal-close" onclick="closePasswordModal()">&times;</button>
+            <h2 class="section-title">Enter Password</h2>
+            <p id="password-target-name" style="margin-bottom: 15px;"></p>
+            <input type="password" id="profile-password-input" placeholder="Password" class="search-input" style="width: 100%; margin-bottom: 15px;">
+            <button class="btn btn-primary" id="password-submit-btn" style="width: 100%;">Unlock Profile</button>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="settings-modal" style="z-index: 2100;">
+        <div class="modal" style="max-width: 500px; padding: 0; overflow: hidden; display: flex; flex-direction: column; height: auto; min-height: 300px;">
+            <div style="padding: 1.5rem; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-color);">
+                <h2 style="margin: 0; font-size: 1.2rem;">Settings</h2>
+                <button class="modal-close" style="position: static;" onclick="closeSettingsModal()">&times;</button>
+            </div>
+            
+            <div style="display: flex; flex: 1; overflow: hidden;">
+                <div style="width: 140px; background: var(--bg-tertiary); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; padding: 10px;">
+                    <button class="tab-btn active" onclick="switchTab('tab-security')">🔐 Security</button>
+                    <div style="margin-top: auto;">
+                        <button class="tab-btn" onclick="logoutProfile()" style="color: var(--error);">🚪 Logout</button>
+                    </div>
+                </div>
+                
+                <div style="flex: 1; padding: 1.5rem; overflow-y: auto;">
+                    <div id="tab-security" class="settings-tab active">
+                        <h3 style="margin-top: 0; font-size: 1rem; margin-bottom: 1.5rem;">Access Control</h3>
+                        
+                        <div class="settings-group">
+                            <label style="display: block; margin-bottom: 8px; font-size: 0.85rem; color: var(--text-muted);">Change PIN / Password</label>
+                            <input type="password" id="settings-old-password" placeholder="Current PIN" class="search-input" style="width: 100%; margin-bottom: 10px;">
+                            <input type="password" id="settings-new-password" placeholder="New PIN" class="search-input" style="width: 100%; margin-bottom: 15px;">
+                            <button class="btn btn-primary btn-sm" onclick="updateProfilePassword()" style="width: 100%;">Update PIN</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <style>
+        .tab-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            padding: 10px 12px;
+            text-align: left;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 500;
+            transition: all 0.2s;
+            margin-bottom: 4px;
+        }
+        .tab-btn:hover {
+            background: rgba(255,255,255,0.05);
+            color: var(--text-primary);
+        }
+        .tab-btn.active {
+            background: var(--accent-primary);
+            color: white;
+        }
+        .settings-tab { display: none; }
+        .settings-tab.active { display: block; }
+        .btn-sm {
+            padding: 0.5rem 1rem;
+            font-size: 0.8rem;
+        }
+    </style>
+
     <div class="modal-overlay" id="detail-modal">
         <div class="modal" style="position:relative;">
             <button class="modal-close" onclick="closeModal()">&times;</button>
@@ -217,7 +316,6 @@
                         </button>
                     </div>
 
-                    <!-- Range Selector (Hidden) -->
                     <div id="range-selector-container" class="range-selector-container" style="display:none;">
                         <h4 class="range-selector-title">Select Chapter Range</h4>
                         <div class="range-inputs">
@@ -250,11 +348,9 @@
                 <ul class="chapter-list" id="modal-chapter-list"></ul>
             </div>
         </div>
+    </div> <div class="toast-container" id="toast-container"></div>
 
-        <!-- Toast Container -->
-        <div class="toast-container" id="toast-container"></div>
-
-        <script src="/manga/js/library.js"></script>
+    <script src="/manga/js/library.js"></script>
 </body>
 
 </html>

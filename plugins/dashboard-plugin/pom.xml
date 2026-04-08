@@ -47,6 +47,13 @@
             <version>2.10.1</version>
         </dependency>
 
+        <!-- Jsoup for proxy adblocking -->
+        <dependency>
+            <groupId>org.jsoup</groupId>
+            <artifactId>jsoup</artifactId>
+            <version>1.17.2</version>
+        </dependency>
+
         <!-- SLF4J API (must be bundled in shaded JAR for runtime) -->
         <dependency>
             <groupId>org.slf4j</groupId>

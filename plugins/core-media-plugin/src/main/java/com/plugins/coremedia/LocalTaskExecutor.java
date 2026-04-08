@@ -56,14 +56,11 @@ public class LocalTaskExecutor implements TaskExecutor {
                 if (f.isFile() && !f.getName().startsWith(".")) {
                     String name = f.getName().toLowerCase();
                     boolean isPart = name.matches(".*part\\d+\\..*");
-                    boolean isProcessed = name.contains("processed");
-                    boolean isPreview = name.contains("preview");
                     boolean isThumb = name.endsWith(".thumb.jpg");
 
-                    // Filter: Accept media files that are NOT already processed/preview/thumb
-                    // We might want to allow 'parts' if the user wants to merge them, but usually
-                    // we process raw files.
-                    if (!isProcessed && !isPreview && !isThumb) {
+                    // Filter: Accept media files that are NOT thumbs. Allow processed and preview
+                    // files to be rescued.
+                    if (!isThumb) {
                         if (name.endsWith(".mp4") || name.endsWith(".mkv") || name.endsWith(".mov")
                                 || name.endsWith(".webm") ||
                                 name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png")
@@ -89,6 +86,13 @@ public class LocalTaskExecutor implements TaskExecutor {
         task.setTotalItems(total);
 
         for (File file : validFiles) {
+            // New pagination fix: ignore files already fully uploaded before checking limit
+            // constraint
+            if (kernel.getDatabaseService().isFileUploaded(folderName, file.getName())) {
+                logger.debug("⏩ Skipping already uploaded local file: {}", file.getName());
+                continue;
+            }
+
             if (limit > 0 && count >= limit)
                 break;
 

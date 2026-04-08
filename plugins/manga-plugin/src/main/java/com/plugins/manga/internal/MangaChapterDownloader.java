@@ -154,8 +154,25 @@ public class MangaChapterDownloader {
     // --- Internal helpers ---
 
     private boolean downloadFile(String url, Path target, String provider) {
+        String finalUrl = url;
+        // Resolve proxy URLs back to absolute URIs for the backend downloader
+        if (url != null && url.startsWith("/api/manga/proxy-image?url=")) {
+            try {
+                String encodedUrl = url.substring("/api/manga/proxy-image?url=".length());
+                // Handle potential additional parameters (if any)
+                int ampIdx = encodedUrl.indexOf('&');
+                if (ampIdx != -1) {
+                    encodedUrl = encodedUrl.substring(0, ampIdx);
+                }
+                finalUrl = java.net.URLDecoder.decode(encodedUrl, java.nio.charset.StandardCharsets.UTF_8);
+                logger.debug("Unwrapped proxy URL for download: {}", finalUrl);
+            } catch (Exception e) {
+                logger.warn("Failed to unwrap proxy URL: {}", url);
+            }
+        }
+
         try {
-            HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
+            HttpURLConnection conn = (HttpURLConnection) URI.create(finalUrl).toURL().openConnection();
             conn.setRequestMethod("GET");
             
             // Provider-specific headers

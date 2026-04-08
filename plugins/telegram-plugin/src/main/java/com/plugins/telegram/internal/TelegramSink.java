@@ -140,10 +140,13 @@ public class TelegramSink implements MediaSink {
             int width = 0;
             int height = 0;
             double duration = 0;
+            int rotation = 0;
+            double sar = 1.0;
 
             // Regex from predecessor
             Pattern resPattern = Pattern.compile("Video:.*,\\s(\\d{2,5})x(\\d{2,5})");
             Pattern durPattern = Pattern.compile("Duration: (\\d{2}):(\\d{2}):(\\d{2})\\.(\\d{2})");
+            Pattern sarPattern = Pattern.compile("SAR\\s(\\d+):(\\d+)");
 
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
                 String line;
@@ -161,18 +164,47 @@ public class TelegramSink implements MediaSink {
                         duration += Double.parseDouble("0." + mDur.group(4));
                     }
 
-                    // Note: Rotation handling in upload is tricky.
-                    // Telegram API doesn't support "rotation" param.
-                    // Video MUST be baked (which TranscoderService now does) or we rely on client.
-                    // But we DO need to perform probing to get SWAP DIMENSIONS if rotation is
-                    // 90/270?
-                    // Yes, but standard ffmpeg output usually shows "SAR/DAR" which we might parse.
-                    // For now, we trust TranscoderService has fixed the file if needed.
+                    Matcher mSar = sarPattern.matcher(line);
+                    if (mSar.find()) {
+                        double num = Double.parseDouble(mSar.group(1));
+                        double den = Double.parseDouble(mSar.group(2));
+                        if (den > 0)
+                            sar = num / den;
+                    }
+
+                    // Rotation parsing
+                    if (line.trim().startsWith("rotate") && !line.contains(": 0")) {
+                        try {
+                            String val = line.substring(line.indexOf(":") + 1).trim();
+                            rotation = Integer.parseInt(val);
+                        } catch (Exception e) {
+                        }
+                    }
+                    if (line.trim().contains("rotation of") && line.contains("degrees")) {
+                        try {
+                            String val = line.substring(line.indexOf("rotation of") + 11, line.indexOf("degrees"))
+                                    .trim();
+                            rotation = (int) Double.parseDouble(val);
+                        } catch (Exception e) {
+                        }
+                    }
                 }
             }
             p.waitFor();
 
             if (width > 0 && height > 0) {
+                // Apply SAR to Width (Square Pixels)
+                if (sar != 1.0) {
+                    width = (int) (width * sar);
+                }
+
+                // Handle Rotation (Swap Dimensions if 90 or 270 degrees)
+                if (Math.abs(rotation) == 90 || Math.abs(rotation) == 270) {
+                    int temp = width;
+                    width = height;
+                    height = temp;
+                }
+
                 return new MediaItem(input, thumb, width, height, (int) duration, true);
             }
 

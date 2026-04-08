@@ -1,6 +1,8 @@
 package com.plugins.downloadcmd;
 
 import com.framework.api.MediaPlugin;
+import com.framework.api.DownloadSourceProvider;
+import com.framework.common.DownloadRequest;
 import com.framework.core.Kernel;
 import com.framework.core.queue.QueueTask;
 import org.slf4j.Logger;
@@ -11,13 +13,13 @@ import java.util.List;
 /**
  * Download Command Plugin - Unified /dl command with smart source detection
  */
-public class DownloadCmdPlugin implements MediaPlugin {
+public class DownloadCmdPlugin implements MediaPlugin, DownloadSourceProvider {
     private static final Logger logger = LoggerFactory.getLogger(DownloadCmdPlugin.class);
     private Kernel kernel;
 
     @Override
     public String getName() {
-        return "DownloadCmd";
+        return "browser";
     }
 
     @Override
@@ -34,6 +36,9 @@ public class DownloadCmdPlugin implements MediaPlugin {
 
         // Register BROWSER_BATCH executor
         kernel.getQueueManager().registerExecutor("BROWSER_BATCH", new BrowserExecutor(kernel));
+
+        // Register default browser provider for direct links
+        kernel.getSourceDetectionService().registerProvider(this);
 
         logger.info("✅ DownloadCmd plugin enabled");
         logger.info("   Usage: /dl {amount} {query} [vid|img] [service]");
@@ -52,6 +57,7 @@ public class DownloadCmdPlugin implements MediaPlugin {
         @Override
         public void execute(QueueTask task) {
             List<String> urls = (List<String>) task.getParameter("urls");
+            List<String> filenames = (List<String>) task.getParameter("filenames"); // May be null
             String filterType = task.getString("filetype");
             String folder = task.getString("folder");
             if (folder == null)
@@ -62,27 +68,15 @@ public class DownloadCmdPlugin implements MediaPlugin {
 
             task.setTotalItems(urls.size());
 
-            for (String url : urls) {
+            for (int idx = 0; idx < urls.size(); idx++) {
+                String url = urls.get(idx);
                 // Filter check
                 if (filterType != null) {
                     String lowerUrl = url.toLowerCase();
                     boolean isVideo = lowerUrl.endsWith(".mp4") || lowerUrl.endsWith(".webm")
                             || lowerUrl.endsWith(".mkv") || lowerUrl.endsWith(".mov");
-                    boolean isImage = lowerUrl.endsWith(".jpg") || lowerUrl.endsWith(".junit")
-                            || lowerUrl.endsWith(".png") || lowerUrl.endsWith(".gif") || lowerUrl.endsWith(".webp"); // .junit
-                                                                                                                     // was
-                                                                                                                     // a
-                                                                                                                     // typo
-                                                                                                                     // in
-                                                                                                                     // thought
-                                                                                                                     // process
-                                                                                                                     // but
-                                                                                                                     // likely
-                                                                                                                     // jpg/jpeg/png
-                                                                                                                     // in
-                                                                                                                     // reality,
-                                                                                                                     // fixing
-                                                                                                                     // here
+                    boolean isImage = lowerUrl.endsWith(".jpg") || lowerUrl.endsWith(".jpeg")
+                            || lowerUrl.endsWith(".png") || lowerUrl.endsWith(".gif") || lowerUrl.endsWith(".webp");
 
                     if ("vid".equalsIgnoreCase(filterType) && !isVideo) {
                         logger.info("Skipping non-video: {}", url);
@@ -94,9 +88,17 @@ public class DownloadCmdPlugin implements MediaPlugin {
                     }
                 }
 
-                String filename = url.substring(url.lastIndexOf("/") + 1);
-                if (filename.contains("?"))
-                    filename = filename.substring(0, filename.indexOf("?"));
+                // Use provided filename if available, otherwise derive from URL
+                String filename = null;
+                if (filenames != null && idx < filenames.size() && filenames.get(idx) != null
+                        && !filenames.get(idx).isEmpty()) {
+                    filename = filenames.get(idx);
+                }
+                if (filename == null || filename.isEmpty()) {
+                    filename = url.substring(url.lastIndexOf("/") + 1);
+                    if (filename.contains("?"))
+                        filename = filename.substring(0, filename.indexOf("?"));
+                }
 
                 com.framework.core.pipeline.PipelineItem item = new com.framework.core.pipeline.PipelineItem(url,
                         filename, task);
@@ -124,7 +126,51 @@ public class DownloadCmdPlugin implements MediaPlugin {
 
     @Override
     public void onDisable() {
+        if (kernel != null) {
+            kernel.getSourceDetectionService().unregisterProvider(this);
+        }
         logger.info("DownloadCmd plugin disabled");
+    }
+
+    // --- DownloadSourceProvider Implementation ---
+
+    @Override
+    public boolean canHandle(String query) {
+        if (query == null || !query.startsWith("http")) return false;
+
+        String q = query.toLowerCase();
+        String[] mediaExtensions = {
+                ".jpg", ".jpeg", ".png", ".gif", ".webp", // Images
+                ".mp4", ".webm", ".mkv", ".avi", ".mov" // Videos
+        };
+
+        for (String ext : mediaExtensions) {
+            if (q.endsWith(ext) || q.contains(ext + "?")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public QueueTask createTask(DownloadRequest req, long chatId, Integer threadId) {
+        QueueTask task = new QueueTask("BROWSER_BATCH");
+
+        if (chatId != 0) {
+            task.addParameter("initiatorChatId", String.valueOf(chatId));
+            if (threadId != null) {
+                task.addParameter("initiatorThreadId", String.valueOf(threadId));
+            }
+        }
+
+        task.addParameter("urls", List.of(req.query()));
+        task.addParameter("folder", "downloads");
+        
+        if (req.filetype() != null) {
+            task.addParameter("filetype", req.filetype());
+        }
+
+        return task;
     }
 
     /**
@@ -137,31 +183,12 @@ public class DownloadCmdPlugin implements MediaPlugin {
 
             logger.info("📥 Download request: {}", request);
 
-            // Auto-detect source if not specified
-            if (request.source() == null) {
-                String detectedSource = SourceDetector.detect(request.query());
-                logger.info("🔍 Auto-detected source: {}", detectedSource);
-
-                // Create new request with detected source
-                request = new DownloadRequest(
-                        request.amount(),
-                        detectedSource,
-                        request.query(),
-                        request.filetype(),
-                        request.service());
-            } else {
-                // Normalize source aliases
-                String normalizedSource = normalizeSource(request.source());
-                request = new DownloadRequest(
-                        request.amount(),
-                        normalizedSource,
-                        request.query(),
-                        request.filetype(),
-                        request.service());
-            }
-
-            // Execute request
-            executeRequest(chatId, threadId, request);
+            // Pass directly to the SourceDetectionService which uses registered providers
+            // to find a match and build the appropriate QueueTask.
+            QueueTask task = kernel.getSourceDetectionService().createTask(request, chatId, threadId);
+            
+            kernel.getQueueManager().addTask(task);
+            sendMessage(chatId, threadId, String.format("✅ Queued: %s", request));
 
         } catch (IllegalArgumentException e) {
             logger.warn("Invalid /dl command: {}", e.getMessage());
@@ -172,120 +199,7 @@ public class DownloadCmdPlugin implements MediaPlugin {
         }
     }
 
-    /**
-     * Execute request (no fallback)
-     */
-    private void executeRequest(long chatId, Integer threadId, DownloadRequest request) {
-        QueueTask task = createTask(request, chatId, threadId);
-        kernel.getQueueManager().addTask(task);
 
-        sendMessage(chatId, threadId, String.format("✅ Queued: %s", request));
-    }
-
-    /**
-     * Create QueueTask from DownloadRequest
-     */
-    private QueueTask createTask(DownloadRequest req, long chatId, Integer threadId) {
-        String taskType;
-
-        // Determine task type based on source
-        switch (req.source()) {
-            case "coomer":
-            case "kemono":
-                taskType = "SEARCH_BATCH"; // PartyPlugin registers this task type
-                break;
-            case "youtube":
-                taskType = "youtube";
-                break;
-            case "booru":
-                taskType = "BOORU_BATCH";
-                break;
-            case "browser":
-                taskType = "BROWSER_BATCH";
-                break;
-            case "socials":
-                taskType = "socials_dl";
-                break;
-            default:
-                throw new IllegalArgumentException("Unknown source: " + req.source());
-        }
-
-        QueueTask task = new QueueTask(taskType);
-
-        // Store initiator info for dynamic routing (ALL sources)
-        if (chatId != 0) {
-            task.addParameter("initiatorChatId", String.valueOf(chatId));
-            if (threadId != null) {
-                task.addParameter("initiatorThreadId", String.valueOf(threadId));
-            }
-        }
-
-        switch (req.source()) {
-            case "coomer":
-            case "kemono":
-                // Party plugin format
-                task.addParameter("query", req.query());
-                task.addParameter("amount", req.amount());
-                task.addParameter("source", req.source());
-
-                // Add filters
-                if (req.filetype() != null)
-                    task.addParameter("filetype", req.filetype());
-                if (req.service() != null)
-                    task.addParameter("service", req.service());
-                break;
-
-            case "youtube":
-                // YouTube plugin format
-                task.addParameter("type", "video");
-                task.addParameter("query", req.query());
-                task.addParameter("amount", req.amount()); // Currently unused for single video but kept for
-                                                           // channel/playlist
-                if (req.filetype() != null)
-                    task.addParameter("filetype", req.filetype());
-                break;
-
-            case "booru":
-                // Booru plugin format
-                task.addParameter("tags", req.query());
-                task.addParameter("amount", req.amount());
-                if (req.filetype() != null)
-                    task.addParameter("filetype", req.filetype());
-                break;
-
-            case "browser":
-                // Browser source format
-                task.addParameter("urls", List.of(req.query()));
-                task.addParameter("folder", "downloads");
-                if (req.filetype() != null)
-                    task.addParameter("filetype", req.filetype());
-                break;
-
-            case "socials":
-                // Socials plugin format
-                task.addParameter("query", req.query());
-                task.addParameter("amount", req.amount());
-                if (req.filetype() != null)
-                    task.addParameter("filetype", req.filetype());
-                break;
-
-            default:
-                throw new IllegalArgumentException("Unknown source: " + req.source());
-        }
-
-        return task;
-    }
-
-    /**
-     * Normalize source aliases
-     */
-    private String normalizeSource(String source) {
-        return switch (source) {
-            case "yt" -> "youtube";
-            case "r34" -> "booru";
-            default -> source;
-        };
-    }
 
     /**
      * Send message to user

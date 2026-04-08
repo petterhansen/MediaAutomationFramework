@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Genres - Rohan Manga Library</title>
+    <link rel="stylesheet" href="/manga/css/manga.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        .genre-container {
+            padding: 2rem;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .category-header {
+            margin-bottom: 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .genre-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 3rem;
+        }
+
+        .genre-chip {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            padding: 12px 20px;
+            border-radius: 12px;
+            text-align: center;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            color: var(--text-secondary);
+            user-select: none;
+        }
+
+        .genre-chip:hover {
+            transform: translateY(-3px);
+            background: var(--bg-tertiary);
+            border-color: var(--accent-color);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            color: white;
+        }
+
+        .genre-chip.active {
+            background: var(--accent-color);
+            color: white;
+            border-color: var(--accent-color);
+            box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
+        }
+
+        #genre-results-title {
+            margin-top: 2rem;
+            margin-bottom: 1.5rem;
+            font-size: 1.5rem;
+            font-weight: 600;
+            display: none;
+        }
+
+        #no-results {
+            text-align: center;
+            padding: 4rem 2rem;
+            color: var(--text-muted);
+            grid-column: 1 / -1;
+            display: none;
+        }
+    </style>
+</head>
+<body class="library-body">
+    <div id="background-wall" class="background-layer"></div>
+
+    <nav class="navbar">
+        <a href="/manga" class="navbar-brand">
+            <span class="icon">🖋️</span>
+            <span>Rohan</span>
+        </a>
+        <div class="navbar-links">
+            <a href="/manga" class="nav-link" style="margin-right: 20px; color: var(--text-secondary); text-decoration: none; font-size: 0.95rem; font-weight: 500;">
+                📚 Library
+            </a>
+            <div class="navbar-profile" id="nav-profile">
+                👤 <span id="current-profile-name">Guest</span>
+            </div>
+        </div>
+    </nav>
+
+    <div class="genre-container">
+        <div class="category-header">
+            <h1 class="section-title">📂 Browse by Genre</h1>
+        </div>
+
+        <div id="genre-grid" class="genre-list">
+            <!-- Genres will be populated here -->
+        </div>
+
+        <div class="genre-toolbar" id="genre-toolbar" style="display: none; margin-bottom: 2rem; background: var(--bg-secondary); padding: 1rem; border-radius: 12px; border: 1px solid var(--border-color); display: flex; align-items: center; gap: 20px; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <label style="font-size: 0.9rem; font-weight: 500; color: var(--text-muted);">Sort By:</label>
+                <select id="sort-select" style="background: var(--bg-primary); color: white; border: 1px solid var(--border-color); padding: 8px 12px; border-radius: 8px; outline: none; cursor: pointer; font-size: 0.9rem;">
+                    <option value="popular">Most Popular</option>
+                    <option value="latest">Latest Updates</option>
+                    <option value="name">Name (A-Z)</option>
+                </select>
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <label style="font-size: 0.9rem; font-weight: 500; color: var(--text-muted);">Source:</label>
+                <select id="source-select" style="background: var(--bg-primary); color: white; border: 1px solid var(--border-color); padding: 8px 12px; border-radius: 8px; outline: none; cursor: pointer; font-size: 0.9rem;">
+                    <option value="">All Sources</option>
+                </select>
+            </div>
+        </div>
+
+        <h2 id="genre-results-title">Results for <span id="active-genre-name" style="color: var(--accent-color);"></span></h2>
+        
+        <div id="no-results-msg" style="text-align: center; padding: 4rem 2rem; color: var(--text-muted);">
+            <h3>Select a genre to browse manga</h3>
+        </div>
+
+        <div class="manga-grid" id="results-grid">
+            <!-- Results will be populated here -->
+        </div>
+
+        <!-- Traditional Pagination Footer -->
+        <div id="pagination-footer" style="display: none; margin-top: 3rem; display: flex; align-items: center; justify-content: center; gap: 1rem; padding: 2rem 0; border-top: 1px solid var(--border-color);">
+            <button id="prev-btn" class="genre-chip" style="padding: 8px 20px; margin: 0;">← Previous</button>
+            <div id="page-display" style="font-weight: 600; color: var(--text-secondary); min-width: 80px; text-align: center;">Page 1</div>
+            <button id="next-btn" class="genre-chip" style="padding: 8px 20px; margin: 0;">Next →</button>
+        </div>
+
+        <div class="loading-spinner" id="loading" style="display:none;">
+            <div class="spinner"></div>
+            <span>Discovering...</span>
+        </div>
+    </div>
+
+    <script src="/manga/js/genre.js"></script>
+</body>
+</html>

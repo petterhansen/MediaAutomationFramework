@@ -11,12 +11,18 @@
     <file url="file://$PROJECT_DIR$/plugins/dashboard-plugin/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/plugins/download-cmd-plugin/src/main/java" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/plugins/download-cmd-plugin/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/manga-plugin/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/manga-plugin/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/plugins/media-safety-plugin/src/main/java" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/plugins/media-safety-plugin/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/plugins/party-plugin/src/main/java" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/plugins/party-plugin/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/socials-plugin/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/socials-plugin/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/plugins/telegram-plugin/src/main/java" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/plugins/telegram-plugin/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/tiktok-plugin/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/plugins/tiktok-plugin/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/plugins/youtube-plugin/src/main/java" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/plugins/youtube-plugin/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/src/main/java" charset="UTF-8" />

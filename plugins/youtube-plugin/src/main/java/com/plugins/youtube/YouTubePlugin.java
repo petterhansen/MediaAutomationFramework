@@ -1,7 +1,10 @@
 package com.plugins.youtube;
 
 import com.framework.api.MediaPlugin;
+import com.framework.api.DownloadSourceProvider;
+import com.framework.common.DownloadRequest;
 import com.framework.core.Kernel;
+import com.framework.core.queue.QueueTask;
 import com.framework.core.pipeline.StageHandler;
 import com.plugins.youtube.internal.YouTubeSource;
 import org.slf4j.Logger;
@@ -17,7 +20,7 @@ import java.io.File;
  * - Configurable quality and format
  * - Metadata extraction
  */
-public class YouTubePlugin implements MediaPlugin {
+public class YouTubePlugin implements MediaPlugin, DownloadSourceProvider {
     private static final Logger logger = LoggerFactory.getLogger(YouTubePlugin.class);
     private Kernel kernel;
     private YouTubeSource source;
@@ -25,7 +28,7 @@ public class YouTubePlugin implements MediaPlugin {
 
     @Override
     public String getName() {
-        return "YouTube";
+        return "youtube";
     }
 
     @Override
@@ -48,6 +51,9 @@ public class YouTubePlugin implements MediaPlugin {
 
         this.source = new YouTubeSource(kernel, ytDlpPath);
         kernel.getQueueManager().registerExecutor("youtube", source);
+
+        // Register as a DownloadSourceProvider
+        kernel.getSourceDetectionService().registerProvider(this);
 
         // Register Pipeline Download Handler
         // This makes YouTubePlugin self-contained and allows it to handle its own
@@ -168,38 +174,69 @@ public class YouTubePlugin implements MediaPlugin {
 
     @Override
     public void onDisable() {
+        if (kernel != null) {
+            kernel.getSourceDetectionService().unregisterProvider(this);
+        }
         logger.info("YouTube plugin disabled");
     }
 
+    // --- DownloadSourceProvider Implementation ---
+
+    @Override
+    public boolean canHandle(String query) {
+        if (query == null) return false;
+        String q = query.toLowerCase();
+        return q.contains("youtube.com") || q.contains("youtu.be");
+    }
+
+    @Override
+    public QueueTask createTask(DownloadRequest req, long chatId, Integer threadId) {
+        QueueTask task = new QueueTask("youtube");
+        task.addParameter("type", "video"); // default to video for generic /dl
+        task.addParameter("query", req.query());
+        int amount = req.amount() > 0 ? req.amount() : 1;
+        task.addParameter("amount", amount);
+        
+        if (req.filetype() != null) {
+            task.addParameter("filetype", req.filetype());
+        }
+
+        if (chatId != 0) {
+            task.addParameter("initiatorChatId", String.valueOf(chatId));
+            if (threadId != null) {
+                task.addParameter("initiatorThreadId", String.valueOf(threadId));
+            }
+        }
+
+        return task;
+    }
+
     private boolean checkYtDlpInstalled() {
-        // Check 1: Local tools directory
-        File localYtDlp = new File("tools/yt-dlp.exe");
-        if (localYtDlp.exists()) {
-            ytDlpPath = localYtDlp.getAbsolutePath();
-            logger.info("Found yt-dlp at: {}", ytDlpPath);
-            return true;
+        // Priority 1: Check local binary paths (including Linux Venv)
+        File[] localPaths = {
+            new File("tools/yt-dlp.exe"),
+            new File("tools/yt-dlp"),
+            new File("tools/venv/bin/yt-dlp")
+        };
+
+        for (File path : localPaths) {
+            if (path.exists()) {
+                ytDlpPath = path.getAbsolutePath();
+                logger.info("🎯 Found yt-dlp binary: {}", ytDlpPath);
+                return true;
+            }
         }
 
-        // Check 2: Linux/Mac tools directory
-        localYtDlp = new File("tools/yt-dlp");
-        if (localYtDlp.exists()) {
-            ytDlpPath = localYtDlp.getAbsolutePath();
-            logger.info("Found yt-dlp at: {}", ytDlpPath);
-            return true;
-        }
-
-        // Check 3: System PATH
+        // Priority 2: Check system PATH
         try {
             Process process = new ProcessBuilder("yt-dlp", "--version").start();
             int exitCode = process.waitFor();
             if (exitCode == 0) {
                 ytDlpPath = "yt-dlp"; // Use system PATH version
-                logger.info("Found yt-dlp in system PATH");
+                logger.info("🎯 Found yt-dlp in system PATH");
                 return true;
             }
-        } catch (Exception e) {
-            // Not in PATH
-        }
+        } catch (Exception e) {}
 
         return false;
     }

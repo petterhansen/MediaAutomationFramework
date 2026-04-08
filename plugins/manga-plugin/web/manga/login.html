@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rohan Login</title>
+    <title>Rohan Library — Login</title>
     <link rel="stylesheet" href="/manga/css/manga.css">
     <style>
         body {
@@ -13,129 +13,398 @@
             justify-content: center;
             min-height: 100vh;
             background: var(--bg-primary);
+            overflow: hidden;
+        }
+
+        /* Ambient Background Glows */
+        .ambient-glow {
+            position: fixed;
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+            border-radius: 50%;
+            z-index: -1;
+            filter: blur(80px);
+            opacity: 0.4;
+            animation: pulse 10s infinite alternate;
+        }
+
+        .glow-1 { top: -10%; left: -10%; }
+        .glow-2 { bottom: -10%; right: -10%; background: radial-gradient(circle, rgba(232, 121, 249, 0.2) 0%, transparent 70%); }
+
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 0.3; }
+            100% { transform: scale(1.1); opacity: 0.5; }
+        }
+
+        .login-container {
+            width: 100%;
+            max-width: 450px;
+            padding: 2rem;
+            z-index: 10;
+            animation: fadeIn 0.8s ease-out;
         }
 
         .login-card {
-            background: var(--bg-secondary);
-            padding: 2rem;
-            border-radius: 12px;
-            width: 100%;
-            max-width: 400px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            background: rgba(18, 18, 26, 0.7);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            padding: 2.5rem;
+            box-shadow: var(--shadow-lg);
+            text-align: center;
+            position: relative;
+            overflow: hidden;
         }
 
-        .login-title {
+        .brand {
+            font-size: 2.5rem;
+            font-weight: 800;
+            margin-bottom: 0.5rem;
+            background: var(--accent-gradient);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -1px;
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            margin-bottom: 2.5rem;
+        }
+
+        .profile-selection {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .profile-item {
+            cursor: pointer;
+            transition: all var(--transition-normal);
+        }
+
+        .profile-item:hover .profile-avatar {
+            transform: translateY(-5px);
+            border-color: var(--accent-primary);
+            box-shadow: var(--shadow-glow);
+        }
+
+        .profile-avatar {
+            width: 70px;
+            height: 70px;
+            margin: 0 auto 0.75rem;
+            background: var(--bg-tertiary);
+            border: 2px solid var(--border-color);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             font-size: 1.5rem;
             font-weight: 700;
             color: var(--text-primary);
-            text-align: center;
-            margin-bottom: 1.5rem;
+            transition: all var(--transition-normal);
+            position: relative;
         }
 
-        .form-group {
-            margin-bottom: 1rem;
+        .profile-avatar.active {
+            border-color: var(--accent-primary);
+            box-shadow: var(--shadow-glow);
         }
 
-        .form-label {
-            display: block;
-            margin-bottom: 0.5rem;
-            color: var(--text-secondary);
-        }
-
-        .form-input {
-            width: 100%;
-            padding: 0.75rem;
-            border-radius: 6px;
+        .lock-badge {
+            position: absolute;
+            bottom: -2px;
+            right: -2px;
+            background: var(--bg-secondary);
+            padding: 4px;
+            border-radius: 50%;
+            font-size: 0.7rem;
             border: 1px solid var(--border-color);
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            font-size: 1rem;
         }
 
-        .form-input:focus {
-            outline: none;
-            border-color: var(--accent-color);
-            box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
-        }
-
-        .btn-login {
-            width: 100%;
-            padding: 0.75rem;
-            background: var(--accent-color);
-            color: white;
-            border: none;
-            border-radius: 6px;
-            font-size: 1rem;
+        .profile-name {
+            font-size: 0.85rem;
             font-weight: 600;
-            cursor: pointer;
-            transition: background 0.2s;
+            color: var(--text-secondary);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
-        .btn-login:hover {
-            background: var(--accent-hover);
-        }
-
-        .error-msg {
-            color: #ef4444;
-            font-size: 0.875rem;
-            margin-top: 0.5rem;
-            text-align: center;
+        .auth-form {
+            margin-top: 2rem;
             display: none;
+            animation: slideUp 0.3s ease-out;
+        }
+
+        .auth-form.active { display: block; }
+
+        .join-section {
+            margin-top: 2rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .join-link {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: color var(--transition-fast);
+        }
+
+        .join-link:hover { color: var(--accent-secondary); }
+
+        .input-group {
+            margin-bottom: 1rem;
+            text-align: left;
+        }
+
+        .input-group label {
+            display: block;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-bottom: 0.4rem;
+            padding-left: 0.5rem;
+        }
+
+        input.modern-input {
+            width: 100%;
+            padding: 0.8rem 1.2rem;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            transition: all var(--transition-normal);
+        }
+
+        input.modern-input:focus {
+            outline: none;
+            border-color: var(--border-active);
+            background: rgba(255, 255, 255, 0.05);
+            box-shadow: 0 0 15px rgba(139, 92, 246, 0.1);
+        }
+
+        .back-link {
+            display: block;
+            margin-top: 1rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            cursor: pointer;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
         }
     </style>
 </head>
 
 <body>
-    <div class="login-card">
-        <h1 class="login-title">🖋️ Rohan</h1>
-        <form id="login-form">
-            <div class="form-group">
-                <label class="form-label" for="username">Username</label>
-                <input type="text" id="username" class="form-input" required autofocus>
+    <div class="pillar-container pillar-left" id="pillar-left"></div>
+    <div class="pillar-container pillar-right" id="pillar-right"></div>
+
+    <div class="ambient-glow glow-1"></div>
+    <div class="ambient-glow glow-2"></div>
+
+    <div class="login-container">
+        <div class="login-card">
+            <h1 class="brand">Rohan</h1>
+            <p class="subtitle" id="status-text">Welcome back, Traveler</p>
+            <div id="login-view" class="auth-form active">
+                <div class="input-group">
+                    <label for="login-username">Username</label>
+                    <input type="text" id="login-username" class="modern-input" placeholder="Enter your profile name">
+                </div>
+                <div class="input-group">
+                    <label for="login-password">Password</label>
+                    <input type="password" id="login-password" class="modern-input" placeholder="••••••••">
+                </div>
+                <button class="btn btn-primary" style="width: 100%; margin-top: 1rem;" onclick="submitLogin()">Login</button>
+                <div class="join-section">
+                    <p class="join-link" onclick="showRegister()">New around here? Join the Library</p>
+                </div>
             </div>
-            <div class="form-group">
-                <label class="form-label" for="password">Password</label>
-                <input type="password" id="password" class="form-input" required>
+
+            <div id="register-view" class="auth-form">
+                <div class="input-group">
+                    <label>Profile Name</label>
+                    <input type="text" id="reg-name" class="modern-input" placeholder="Kishibe Rohan">
+                </div>
+                <div class="input-group">
+                    <label>Password (Optional)</label>
+                    <input type="password" id="reg-pass" class="modern-input" placeholder="Secure it">
+                </div>
+                <div class="input-group">
+                    <label>Invite Code</label>
+                    <input type="text" id="reg-invite" class="modern-input" placeholder="INV-XXXX-XXXX">
+                </div>
+                <button class="btn btn-primary" style="width: 100%; margin-top: 1rem;" onclick="submitRegister()">Create & Enter</button>
+                <div class="back-link" onclick="showLogin()">← Already have a profile?</div>
             </div>
-            <button type="submit" class="btn-login">Sign In</button>
-            <div id="error-msg" class="error-msg">Invalid credentials</div>
-        </form>
+
+            <div id="error-msg" class="text-error" style="margin-top: 1.5rem; font-size: 0.85rem; display: none; padding: 0.75rem; background: rgba(239, 68, 68, 0.1); border-radius: var(--radius-sm); border: 1px solid rgba(239, 68, 68, 0.2);"></div>
+        </div>
     </div>
 
     <script>
-        document.getElementById('login-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
-            const errorMsg = document.getElementById('error-msg');
+        const API_BASE = '/api/manga';
+
+        async function submitLogin() {
+            const username = document.getElementById('login-username').value.trim();
+            const password = document.getElementById('login-password').value;
+            const error = document.getElementById('error-msg');
+            error.style.display = 'none';
+
+            if (!username) {
+                error.textContent = 'Please enter your username';
+                error.style.display = 'block';
+                return;
+            }
 
             try {
-                const res = await fetch('/api/login', {
+                const res = await fetch(API_BASE + '/authenticate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user: username, pass: password })
+                    body: JSON.stringify({ username, password })
                 });
 
                 if (res.ok) {
                     const data = await res.json();
-                    if (data.token) {
-                        localStorage.setItem('maf_token', data.token);
-                        // Redirect back to original page or library
-                        const params = new URLSearchParams(window.location.search);
-                        window.location.href = params.get('redirect') || '/manga/library';
-                    } else {
-                        throw new Error('No token received');
-                    }
+                    enterLibrary(data.id, data.name);
                 } else {
-                    errorMsg.style.display = 'block';
-                    errorMsg.textContent = 'Invalid credentials';
+                    const data = await res.json();
+                    error.textContent = data.error || 'Invalid credentials';
+                    error.style.display = 'block';
                 }
             } catch (err) {
-                console.error(err);
-                errorMsg.style.display = 'block';
-                errorMsg.textContent = 'Login failed. Check server logs.';
+                error.textContent = 'Login failed. Please try again.';
+                error.style.display = 'block';
             }
+        }
+
+        function showRegister() {
+            document.getElementById('login-view').classList.remove('active');
+            document.getElementById('register-view').classList.add('active');
+            document.getElementById('status-text').textContent = 'Join the Rohan Library';
+            document.getElementById('error-msg').style.display = 'none';
+        }
+
+        function showLogin() {
+            document.getElementById('register-view').classList.remove('active');
+            document.getElementById('login-view').classList.add('active');
+            document.getElementById('status-text').textContent = 'Welcome back, Traveler';
+            document.getElementById('error-msg').style.display = 'none';
+        }
+
+        async function submitRegister() {
+            const name = document.getElementById('reg-name').value.trim();
+            const password = document.getElementById('reg-pass').value;
+            const inviteCode = document.getElementById('reg-invite').value.trim();
+            const error = document.getElementById('error-msg');
+            error.style.display = 'none';
+
+            if (!name || !inviteCode) {
+                error.textContent = 'Name and Invite Code are required';
+                error.style.display = 'block';
+                return;
+            }
+
+            try {
+                const res = await fetch(API_BASE + '/profiles', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, password, inviteCode })
+                });
+
+                if (res.ok) {
+                    const profile = await res.json();
+                    enterLibrary(profile.id, profile.name);
+                } else {
+                    const data = await res.json();
+                    error.textContent = data.error || 'Failed to create profile';
+                    error.style.display = 'block';
+                }
+            } catch (err) {
+                error.textContent = 'Registration failed';
+                error.style.display = 'block';
+            }
+        }
+
+        function enterLibrary(id, name) {
+            localStorage.setItem('maf_manga_profile_id', id);
+            localStorage.setItem('maf_manga_profile_name', name);
+            
+            const params = new URLSearchParams(window.location.search);
+            const redirect = params.get('redirect') || '/manga';
+            window.location.href = redirect;
+        }
+
+        // Enter key support
+        document.querySelectorAll('input').forEach(input => {
+            input.addEventListener('keypress', e => {
+                if (e.key === 'Enter') {
+                    if (document.getElementById('login-view').classList.contains('active')) {
+                        submitLogin();
+                    } else {
+                        submitRegister();
+                    }
+                }
+            });
         });
+
+        // --- Optimized Manga Pillars Logic ---
+        async function initMangaWall() {
+            const leftPillar = document.getElementById('pillar-left');
+            const rightPillar = document.getElementById('pillar-right');
+            if (!leftPillar || !rightPillar) return;
+
+            try {
+                const res = await fetch(API_BASE + '/random?limit=30');
+                const randoms = await res.json();
+                
+                const getProxiedUrl = (url) => {
+                    if (url && (url.startsWith('http') || url.includes('mangadex') || url.includes('mangapill'))) {
+                        return API_BASE + '/proxy-image?url=' + encodeURIComponent(url);
+                    }
+                    return url;
+                };
+
+                const covers = randoms.map(m => getProxiedUrl(m.coverUrl)).filter(src => src);
+                if (covers.length < 2) return;
+
+                const half = Math.floor(covers.length / 2);
+                const leftCovers = covers.slice(0, half);
+                const rightCovers = covers.slice(half);
+
+                const fillPillar = (pillar, imgArray) => {
+                    const panelsToCreate = [...imgArray, ...imgArray]; 
+                    pillar.innerHTML = '';
+                    panelsToCreate.forEach(src => {
+                        const panel = document.createElement('div');
+                        panel.className = 'pillar-panel';
+                        panel.style.backgroundImage = `url("${src}")`;
+                        pillar.appendChild(panel);
+                    });
+                };
+
+                fillPillar(leftPillar, leftCovers);
+                fillPillar(rightPillar, rightCovers);
+
+            } catch (err) {
+                console.warn('Manga pillars init failed', err);
+            }
+        }
+
+        initMangaWall();
     </script>
 </body>
 

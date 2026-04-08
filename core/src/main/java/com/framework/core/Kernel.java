@@ -38,6 +38,7 @@ public class Kernel {
     private final ChatImporter chatImporter;
     private final BlacklistManager blacklistManager;
     private final DatabaseService databaseService;
+    private final SourceDetectionService sourceDetectionService;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final File toolsDir;
@@ -75,6 +76,7 @@ public class Kernel {
         this.chatImporter = new ChatImporter(this.statisticsManager);
         this.queueManager = new QueueManager(this);
         this.pipelineManager = new PipelineManager(this);
+        this.sourceDetectionService = new SourceDetectionService();
         this.pluginLoader = new PluginLoader(this);
     }
 
@@ -197,5 +199,9 @@ public class Kernel {
 
     public DatabaseService getDatabaseService() {
         return databaseService;
+    }
+
+    public SourceDetectionService getSourceDetectionService() {
+        return sourceDetectionService;
     }
 }

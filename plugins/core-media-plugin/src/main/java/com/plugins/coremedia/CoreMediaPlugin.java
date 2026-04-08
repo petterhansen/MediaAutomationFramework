@@ -42,10 +42,17 @@ public class CoreMediaPlugin implements MediaPlugin {
         kernel.getPipelineManager().registerDownloadHandler(new com.framework.core.pipeline.StageHandler<>() {
             @Override
             public boolean supports(com.framework.core.pipeline.PipelineItem item) {
-                // Fallback catch-all for http/https, BUT ignore yt-dlp items (handled by
-                // YouTubePlugin)
-                return !Boolean.TRUE.equals(item.getMetadata().get("yt_dlp")) &&
-                        item.getSourceUrl().startsWith("http");
+                // Fallback catch-all for http/https, BUT ignore items handled by specific
+                // plugins
+                Map<String, Object> meta = item.getMetadata();
+                if (Boolean.TRUE.equals(meta.get("yt_dlp")))
+                    return false;
+                if (Boolean.TRUE.equals(meta.get("socials_dl")))
+                    return false;
+                if (Boolean.TRUE.equals(meta.get("tiktok_slideshow")))
+                    return false;
+
+                return item.getSourceUrl().startsWith("http");
             }
 
             @Override

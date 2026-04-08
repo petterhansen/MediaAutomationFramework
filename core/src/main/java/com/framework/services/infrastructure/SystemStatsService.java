@@ -59,12 +59,13 @@ public class SystemStatsService {
         return root;
     }
 
-    // Unterdrückt Warnung für veraltete Methode in neueren JDKs
-    @SuppressWarnings("deprecation")
     private double getCpuLoad() {
         OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
         if (osBean instanceof com.sun.management.OperatingSystemMXBean) {
-            return ((com.sun.management.OperatingSystemMXBean) osBean).getSystemCpuLoad() * 100;
+            com.sun.management.OperatingSystemMXBean sunBean = (com.sun.management.OperatingSystemMXBean) osBean;
+            // Use getCpuLoad() if available, fallback for older JDKs if necessary
+            // But getSystemCpuLoad is deprecated since 14, getCpuLoad is the replacement.
+            return sunBean.getCpuLoad() * 100;
         }
         return 0;
     }

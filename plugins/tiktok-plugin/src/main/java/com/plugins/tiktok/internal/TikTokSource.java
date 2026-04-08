@@ -60,21 +60,99 @@ public class TikTokSource implements TaskExecutor {
             return;
         }
 
-        String title = info.get("title").getAsString();
+        String title = info.has("title") ? info.get("title").getAsString() : "TikTok";
         String uploader = info.has("uploader") ? info.get("uploader").getAsString() : "Unknown";
         String id = info.get("id").getAsString();
-        
+
         task.setTotalItems(1);
 
+        // Check for "entries" (Playlist) - potential slideshow
+        if (info.has("entries") && info.get("entries").isJsonArray()) {
+            var entries = info.get("entries").getAsJsonArray();
+            if (entries.size() > 0) {
+                List<String> entryImages = new ArrayList<>();
+                for (var e : entries) {
+                    if (e.isJsonObject() && e.getAsJsonObject().has("url")) {
+                        if (url.contains("/video/") || url.contains("/photo/")) {
+                            entryImages.add(e.getAsJsonObject().get("url").getAsString());
+                        }
+                    }
+                }
+                if (!entryImages.isEmpty()) {
+                    logger.info("📸 Detected TikTok Slideshow (via entries): {} items", entryImages.size());
+
+                    PipelineItem item = new PipelineItem(url, sanitizeFilename(uploader + "_" + id) + ".mp4", task);
+                    item.getMetadata().put("source", "tiktok");
+                    item.getMetadata().put("creator", uploader);
+                    item.getMetadata().put("title", title);
+                    item.getMetadata().put("tiktok_slideshow", true);
+                    item.getMetadata().put("yt_dlp", false);
+                    item.getMetadata().put("tiktok_images", entryImages);
+
+                    if (info.has("url")) {
+                        item.getMetadata().put("tiktok_audio", info.get("url").getAsString());
+                    }
+
+                    kernel.getPipelineManager().submit(item);
+                    logger.info("Queued TikTok Slideshow: {} - {}", uploader, title);
+                    return;
+                }
+            }
+        }
+
+        // Check for Slideshow (Images)
+        if (info.has("images") && info.get("images").isJsonArray() && info.get("images").getAsJsonArray().size() > 0) {
+            logger.info("📸 Detected TikTok Slideshow: {} images", info.get("images").getAsJsonArray().size());
+
+            PipelineItem item = new PipelineItem(url, sanitizeFilename(uploader + "_" + id) + ".mp4", task);
+            item.getMetadata().put("source", "tiktok");
+            item.getMetadata().put("creator", uploader);
+            item.getMetadata().put("title", title);
+            item.getMetadata().put("tiktok_slideshow", true);
+            item.getMetadata().put("yt_dlp", false); // We handle this ourselves
+
+            // Extract Images
+            List<String> imageUrls = new ArrayList<>();
+            for (var img : info.get("images").getAsJsonArray()) {
+                // yt-dlp images usually have 'url'
+                if (img.isJsonObject() && img.getAsJsonObject().has("url")) {
+                    imageUrls.add(img.getAsJsonObject().get("url").getAsString());
+                }
+            }
+            item.getMetadata().put("tiktok_images", imageUrls);
+
+            // Extract Audio (if available) - typically 'url' in 'requested_downloads' or
+            // distinct field
+            // But yt-dlp dump-json for slideshows often has 'url' at top level for the
+            // audio track or separate entry
+            // We'll try to find a valid audio url. For TikTok, often 'url' points to the
+            // music.
+            if (info.has("url")) {
+                item.getMetadata().put("tiktok_audio", info.get("url").getAsString());
+            } else if (info.has("requested_downloads")) {
+                // Sometimes audio is here
+                // Simplified: Just check if we can find a format?
+                // For now rely on 'url' or fallback to silent slideshow
+            }
+
+            kernel.getPipelineManager().submit(item);
+            logger.info("Queued TikTok Slideshow: {} - {}", uploader, title);
+            return;
+        }
+
+        // Warning for Audio-Only (likely missing cookies)
+        if (info.has("resolution") && "audio only".equals(info.get("resolution").getAsString())) {
+            logger.warn("⚠️ TikTok returned 'audio only' and no images found. This is likely a slideshow.");
+            logger.warn("👉 Try setting a 'cookie_browser' in configuration to fix this.");
+        }
+
+        // Normal Video
         PipelineItem item = new PipelineItem(url, sanitizeFilename(uploader + "_" + id) + ".mp4", task);
         item.getMetadata().put("source", "tiktok");
         item.getMetadata().put("creator", uploader);
         item.getMetadata().put("title", title);
-        item.getMetadata().put("yt_dlp", true); // Reuse YouTubePlugin's yt-dlp handler if available, OR we can handle it directly.
-        // Since we didn't register a handler in TikTokPlugin, we must act as a source that generates items 
-        // that are compatible with YouTubePlugin's handler OR implement our own handler.
-        // HACK: Since YouTubePlugin registers a global handler for "yt_dlp=true", we can reuse it!
-        item.getMetadata().put("yt_dlp_path", ytDlpPath); 
+        item.getMetadata().put("yt_dlp", true); // Handle by YouTubePlugin
+        item.getMetadata().put("yt_dlp_path", ytDlpPath);
         item.getMetadata().put("yt_dlp_args", buildYtDlpArgs());
 
         kernel.getPipelineManager().submit(item);
@@ -160,12 +238,19 @@ public class TikTokSource implements TaskExecutor {
         List<String> args = new ArrayList<>();
 
         // TikTok specific args might be needed
-        
+
         // Cookies from browser are crucial for TikTok
         String browser = config.getPluginSetting("TikTok", "cookie_browser", "");
         if (browser != null && !browser.isEmpty()) {
             args.add("--cookies-from-browser");
             args.add(browser);
+        }
+
+        // Cookies from file
+        String cookieFile = config.getPluginSetting("TikTok", "cookie_file", "");
+        if (cookieFile != null && !cookieFile.isEmpty()) {
+            args.add("--cookies");
+            args.add(cookieFile);
         }
 
         return args;

@@ -1,5 +1,7 @@
 package com.plugins.downloadcmd;
 
+import com.framework.common.DownloadRequest;
+
 /**
  * Parses /dl command arguments into DownloadRequest
  */
@@ -44,13 +46,6 @@ public class CommandParser {
             String[] parts = rawQuery.split(":", 2);
             source = parts[0].toLowerCase();
             query = parts[1];
-
-            // Validate source
-            if (!isValidSource(source)) {
-                throw new IllegalArgumentException(
-                        "Invalid source: " + source + ". " +
-                                "Valid: coomer, kemono, youtube, booru, browser, socials");
-            }
         } else {
             query = rawQuery;
             // source remains null = auto-detect
@@ -82,18 +77,7 @@ public class CommandParser {
             }
         }
 
-        return new DownloadRequest(amount, source, query, filetype, service);
-    }
-
-    private static boolean isValidSource(String source) {
-        return source.equals("coomer") ||
-                source.equals("kemono") ||
-                source.equals("youtube") ||
-                source.equals("yt") || // Shorthand
-                source.equals("booru") ||
-                source.equals("r34") || // Alias
-                source.equals("browser") ||
-                source.equals("socials");
+        return new DownloadRequest(amount, source, query, filetype, service, null);
     }
 
     private static boolean isValidService(String service) {

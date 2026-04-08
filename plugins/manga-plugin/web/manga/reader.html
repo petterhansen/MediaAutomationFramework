@@ -9,7 +9,6 @@
     <link rel="icon" type="image/x-icon" href="/manga/favicon.ico">
     <link rel="stylesheet" href="/manga/css/manga.css">
     <style>
-        /* Reader-only overrides */
         body {
             background: #000;
             overflow: hidden;
@@ -23,10 +22,8 @@
 
 <body>
 
-    <!-- Reader Container -->
     <div class="reader-container" id="reader-container">
 
-        <!-- Sidebar (Chapter List) -->
         <aside class="reader-sidebar" id="reader-sidebar">
             <div class="reader-sidebar-header">
                 <h3 id="reader-manga-title">Loading...</h3>
@@ -39,29 +36,23 @@
             <ul class="chapter-list" id="reader-chapter-list"></ul>
         </aside>
 
-        <!-- Reader Content Area -->
         <div class="reader-content vertical-mode" id="reader-content">
 
-            <!-- Top tap zone for showing controls -->
             <div id="tap-zone-top" style="position:fixed;top:0;left:0;right:0;height:60px;z-index:55;cursor:pointer;">
             </div>
 
-            <!-- Page Container -->
             <div class="page-container" id="page-container">
-                <!-- Pages loaded dynamically -->
                 <div class="loading-spinner" id="reader-loading">
                     <div class="spinner"></div>
                     <span>Loading chapter...</span>
                 </div>
             </div>
 
-            <!-- Bottom tap zone -->
             <div id="tap-zone-bottom"
                 style="position:fixed;bottom:0;left:0;right:0;height:60px;z-index:55;cursor:pointer;"></div>
         </div>
     </div>
 
-    <!-- Reader Controls Bar -->
     <div class="reader-controls" id="reader-controls">
         <button class="btn btn-icon btn-secondary" id="btn-sidebar" onclick="toggleSidebar()"
             title="Toggle chapter list">📑</button>
@@ -86,7 +77,6 @@
             title="Fullscreen">⛶</button>
     </div>
 
-    <!-- Toast Container -->
     <div class="toast-container" id="toast-container"></div>
 
     <script src="/manga/js/reader.js"></script>
